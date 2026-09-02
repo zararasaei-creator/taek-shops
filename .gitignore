@@ -1,0 +1,73 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# next.js
+/.next/
+/out/
+
+# production build
+/build
+/dist
+
+# testing / coverage
+/coverage
+/playwright-report
+/playwright/.cache
+/test-results
+*.lcov
+
+# misc
+.DS_Store
+Thumbs.db
+*.pem
+
+# debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# secrets & environment
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# local database & data volumes
+/data
+/postgres-data
+*.sqlite
+*.sqlite3
+*.db
+
+# user uploads / import staging (never commit customer or business data)
+/uploads
+/tmp
+/storage
+
+# generated code (Prisma client, etc.)
+/src/generated
+/prisma/generated
+
+# typescript / build info
+*.tsbuildinfo
+next-env.d.ts
+
+# IDE / editor
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# vercel
+.vercel
