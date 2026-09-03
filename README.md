@@ -4,12 +4,13 @@ A secure, maintainable, responsive, multilingual-ready **Canadian e-commerce
 platform** for taekwondo uniforms, belts, protective gear, training equipment,
 and accessories.
 
-> **Project status: Phase 4 (catalogue, inventory, admin management, CSV import
-> foundation).** The toolchain, Prisma/PostgreSQL schema, auth/RBAC/audit, and
-> now the product catalogue domain, admin management UI (`/admin/catalog`),
-> inventory adjustment service, image-storage abstraction, and CSV product
-> importer are in place. Storefront pages, cart, checkout, and payments are
-> planned work — see the roadmap.
+> **Project status: Phases 1–4 complete; Phase 5 (inventory hardening) next.**
+> The toolchain, Prisma/PostgreSQL schema, auth/RBAC/audit, the product
+> catalogue domain, admin management UI (`/admin/catalog`), inventory adjustment
+> service, image-storage abstraction, and CSV product importer are in place and
+> were verified against a live PostgreSQL database in the Phase 5 pre-flight
+> (2026-09-03). Storefront pages, cart, checkout, and payments are planned work
+> — see the roadmap.
 
 ## Documentation
 

@@ -98,7 +98,7 @@ Phase 3 (alongside the auth work), not retroactively in Phase 2.
 
 ---
 
-## Phase 3 — Authentication, authorization & audit 🚧 _(awaiting CTO review, 2026-09-03)_
+## Phase 3 — Authentication, authorization & audit ✅ _(live pre-flight verified 2026-09-03)_
 
 **Scope (delivered)**
 
@@ -140,9 +140,17 @@ Phase 3 (alongside the auth work), not retroactively in Phase 2.
 - [x] Security headers present (e2e); CSP does not break the app.
 - [x] `prisma validate` / `generate` / migration determinism.
 - [x] `typecheck`, `lint`, `test` (all Phase 1–3), `build` green.
-- [ ] **Blocked (no Docker/Postgres in environment):** live `migrate deploy`,
-      real admin seed, and DB-backed e2e for the full sign-in → session →
-      logout loop. Carried to the Phase 4 pre-flight.
+- [x] **Verified in the Phase 5 pre-flight against live PostgreSQL (2026-09-03):**
+      `migrate deploy` applied all three migrations to a clean database; the
+      optional admin seed creates one `ADMIN`/`ACTIVE` user with an Argon2id
+      hash and is idempotent (no password rotation on re-run); the full
+      sign-in → session → logout loop was exercised end-to-end over HTTP
+      (pre-login 401 → bad-password 401 → login 200 + `lastLoginAt` set →
+      session reports the user → admin API 200 → logout 200 → session cleared →
+      admin API 401), with `AuditLog` rows for `auth.login.failed`,
+      `auth.login.succeeded`, `auth.logout`. Verified manually; an **automated
+      e2e for the authenticated flow is deferred to Phase 5** (lands with the
+      DB-backed integration suite).
 
 **Deferred to Phase 4+:** real email transport; shared-store rate limiter;
 customer self-registration UI; account-settings UI; brute-force lockout counter;
@@ -150,7 +158,7 @@ tightening `style-src` off `'unsafe-inline'`.
 
 ---
 
-## Phase 4 — Catalogue, inventory, admin management & import foundation 🚧 _(awaiting CTO review, 2026-09-05)_
+## Phase 4 — Catalogue, inventory, admin management & import foundation ✅ _(live pre-flight verified 2026-09-03)_
 
 Per the Phase 4 CTO brief this phase absorbed the inventory adjustment domain
 (was Phase 5) and the CSV import foundation (was Phase 10). Full design:
@@ -197,10 +205,21 @@ Per the Phase 4 CTO brief this phase absorbed the inventory adjustment domain
       e2e 401/403/CSRF).
 - [x] `typecheck`, `lint`, `prettier`, `next build`, `prisma validate/generate`,
       **181** unit tests, **13** e2e — all green.
-- [ ] **Blocked (no Docker/PostgreSQL):** `migrate deploy`, seed, DB-backed
-      integration/e2e for catalogue CRUD, variant constraints, inventory
-      transactions, and the import preview→commit→re-import idempotency round
-      trip. Release-blocking; carried to the Phase 5 pre-flight.
+- [x] **Verified in the Phase 5 pre-flight against live PostgreSQL (2026-09-03):**
+      `migrate deploy` applied `20260905000000_phase4_catalog` (both unique
+      indexes — `ProductVariant_sku_key`, `ProductVariant_productId_optionSignature_key`
+      — confirmed present); seed populates 1 product / 4 variants with distinct
+      option signatures and is idempotent across repeated runs; a live inventory
+      adjustment wrote a `StockMovement` + `inventory.adjusted` `AuditLog` and an
+      oversell attempt was rejected (409) with on-hand unchanged; a CSV import
+      round trip ran preview (zero catalogue writes) → commit (2 products
+      created, row-level error isolation, no partial write) → re-import of the
+      same file (created 0 / skipped 2, no new rows) = idempotent;
+      formula-injection payloads were neutralised then rejected; in-file
+      duplicate SKU and duplicate option combination were both rejected.
+      **Seed defect found and fixed during this pre-flight:** `prisma/seed.ts`
+      never set `ProductVariant.optionSignature`, so all four demo variants
+      collided on the new unique constraint — fixed in commit `2537d32`.
 - [ ] Storefront pages, faceted filtering UI, accessibility/perf budgets — not in
       this phase's scope (public query layer is done and tested).
 
@@ -210,6 +229,21 @@ Per the Phase 4 CTO brief this phase absorbed the inventory adjustment domain
 
 The inventory adjustment domain, ledger, low-stock view, and order-flow
 primitives were delivered in Phase 4 (`src/server/inventory/`). Remaining:
+
+**Pre-work carried from the Phase 5 pre-flight (2026-09-03)**
+
+- **`output: "standalone"` vs `next start` mismatch.** `next.config.ts` sets
+  `output: "standalone"` while `package.json` `start` and `playwright.config.ts`
+  both invoke `next start`; Next 16 warns this pairing is unsupported. Currently
+  non-fatal (served all e2e + manual pre-flight checks) but a latent Phase 13
+  deployment problem and a possible e2e-flakiness source. Decide: switch the
+  scripts to `node .next/standalone/server.js`, or drop `output: "standalone"`
+  until Phase 13. Not a code change to make mid-Phase-5-feature-work.
+- Add the automated e2e for the authenticated sign-in → session → logout flow
+  (verified manually in the pre-flight) alongside the DB-backed integration
+  suite below.
+- Run a clean `npm ci` in CI before Phase 5 sign-off (the pre-flight reused the
+  existing `node_modules`).
 
 **Scope**
 
