@@ -6,3 +6,6 @@
 *.ico binary
 *.woff binary
 *.woff2 binary
+
+# CSV fixtures/templates keep their exact bytes (RFC 4180 CRLF).
+*.csv -text

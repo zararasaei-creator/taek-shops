@@ -355,6 +355,12 @@ model ProductVariant {
   weightGrams         Int?
   trackInventory      Boolean  @default(true)
   active              Boolean  @default(true)
+  // Deterministic signature of this variant's selected option values (sorted
+  // optionValue ids joined by "|"; "" for a product with no options). Maintained
+  // by the variant service inside the same transaction as option-value changes.
+  // The composite unique below makes duplicate option combinations per product
+  // impossible at the database level. Introduced Phase 4.
+  optionSignature     String   @default("")
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -366,6 +372,7 @@ model ProductVariant {
   cartItems      CartItem[]
   orderItems     OrderItem[]
 
+  @@unique([productId, optionSignature])
   @@index([productId])
   @@index([active])
 }

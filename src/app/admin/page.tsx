@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { Container } from "@/components/ui/container";
 import { requireRole } from "@/server/auth";
 import { permissionsForRole } from "@/server/auth/authorization";
@@ -34,8 +36,22 @@ export default async function AdminDashboardPage() {
           </ul>
         )}
       </div>
-      <p className="mt-8 max-w-2xl text-sm text-zinc-500">
-        Catalogue, inventory, orders, and import management are scheduled for later phases.
+      <div className="mt-8 flex flex-wrap gap-3">
+        <Link
+          href="/admin/catalog"
+          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+        >
+          Catalogue management
+        </Link>
+        <Link
+          href="/admin/catalog/import"
+          className="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
+        >
+          Import products (CSV)
+        </Link>
+      </div>
+      <p className="mt-6 max-w-2xl text-sm text-zinc-500">
+        Orders, checkout, and payments are scheduled for later phases.
       </p>
     </Container>
   );

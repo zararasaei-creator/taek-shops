@@ -4,11 +4,12 @@ A secure, maintainable, responsive, multilingual-ready **Canadian e-commerce
 platform** for taekwondo uniforms, belts, protective gear, training equipment,
 and accessories.
 
-> **Project status: Phase 3 (authentication, authorization & audit).** The
-> application shell, toolchain, design docs, the Prisma/PostgreSQL schema, and
-> now a custom credentials-auth + RBAC + audit-log foundation are in place. The
-> storefront, catalogue/admin management, payments, and the spreadsheet importer
-> are planned work — see the roadmap.
+> **Project status: Phase 4 (catalogue, inventory, admin management, CSV import
+> foundation).** The toolchain, Prisma/PostgreSQL schema, auth/RBAC/audit, and
+> now the product catalogue domain, admin management UI (`/admin/catalog`),
+> inventory adjustment service, image-storage abstraction, and CSV product
+> importer are in place. Storefront pages, cart, checkout, and payments are
+> planned work — see the roadmap.
 
 ## Documentation
 
@@ -16,10 +17,12 @@ and accessories.
   security, testing, deployment, key decisions.
 - [Security notes](docs/security.md) — auth, sessions, RBAC, audit, headers,
   deferrals.
+- [Catalogue, inventory & import](docs/catalog.md) — product/variant/option
+  model, lifecycle, inventory rules, image storage, CSV import workflow.
 - [Implementation roadmap](docs/implementation-roadmap.md) — phased plan with
   acceptance criteria.
-- [Product import specification](docs/product-import-specification.md) —
-  spreadsheet columns and rules for the bulk importer.
+- [Product import specification](docs/product-import-specification.md) — full
+  future importer spec ([Phase 4 template](docs/product-import-template.csv)).
 
 ## Tech stack
 
@@ -136,21 +139,24 @@ npm ci && npm run format:check && npm run lint && npm run typecheck && npm run t
 src/
   app/
     (storefront)/        Storefront routes (public)
-    admin/               Admin dashboard (auth-gated in Phase 3)
-    api/health/          Liveness probe
-  components/ui/         Shared, accessible UI components
+    admin/               Admin dashboard + /admin/catalog management UI
+    api/                 Route handlers (auth, admin/users, admin/catalog, import, media, health)
+  components/            Shared UI + admin form primitives
   lib/
-    utils/               Small framework-agnostic helpers
-    validation/          Shared Zod schemas (Phase 4+)
+    validation/          Shared Zod schemas (auth, catalog)
+    http/                Route-handler helpers (CSRF, error mapping, request meta)
   proxy.ts               Edge proxy: security headers (CSP) + optimistic /admin gate
   server/
     config/env.ts        Validated environment configuration
     auth/                Credentials auth, DB sessions, RBAC, password/token handling
     audit/               Generic append-only audit log + sanitisation
     users/               Admin user-management services (server-enforced)
+    catalog/             Brand/category/product/variant/option/image services + public queries
+    inventory/           Controlled stock adjustment + order-flow primitives
+    storage/             ObjectStorage interface + local dev backend
+    import/              CSV product import (parse -> validate -> preview -> commit)
     domain/money.ts      Integer-cents money helper
     db/                  Prisma client singleton + repositories
-    import/              Spreadsheet import pipeline (Phase 10)
 prisma/
   schema.prisma          Database schema of record (29 models, 19 enums)
   migrations/            Migration history

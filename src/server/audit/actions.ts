@@ -16,6 +16,38 @@ export const AUDIT_ACTIONS = {
   USER_CREATED: "user.created",
   USER_ROLE_CHANGED: "user.role.changed",
   USER_STATUS_CHANGED: "user.status.changed",
+
+  // Catalogue (Phase 4)
+  BRAND_CREATED: "catalog.brand.created",
+  BRAND_UPDATED: "catalog.brand.updated",
+  BRAND_ARCHIVED: "catalog.brand.archived",
+  CATEGORY_CREATED: "catalog.category.created",
+  CATEGORY_UPDATED: "catalog.category.updated",
+  CATEGORY_ARCHIVED: "catalog.category.archived",
+  PRODUCT_CREATED: "catalog.product.created",
+  PRODUCT_UPDATED: "catalog.product.updated",
+  PRODUCT_STATUS_CHANGED: "catalog.product.status_changed",
+  PRODUCT_OPTIONS_CHANGED: "catalog.product.options_changed",
+  VARIANT_CREATED: "catalog.variant.created",
+  VARIANT_UPDATED: "catalog.variant.updated",
+  VARIANT_PRICE_CHANGED: "catalog.variant.price_changed",
+  VARIANT_ARCHIVED: "catalog.variant.archived",
+  PRODUCT_IMAGE_ADDED: "catalog.image.added",
+  PRODUCT_IMAGE_UPDATED: "catalog.image.updated",
+  PRODUCT_IMAGE_REMOVED: "catalog.image.removed",
+
+  // Inventory (Phase 4)
+  INVENTORY_ADJUSTED: "inventory.adjusted",
+  INVENTORY_RECEIVED: "inventory.received",
+  INVENTORY_RESERVED: "inventory.reserved",
+  INVENTORY_RELEASED: "inventory.released",
+  INVENTORY_COMMITTED: "inventory.committed",
+  INVENTORY_RESTOCKED: "inventory.restocked",
+
+  // Import (Phase 4)
+  IMPORT_PREVIEWED: "import.product.previewed",
+  IMPORT_COMMITTED: "import.product.committed",
+  IMPORT_CANCELLED: "import.product.cancelled",
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

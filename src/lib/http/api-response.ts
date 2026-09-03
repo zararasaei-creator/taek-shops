@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 
 import { isAuthError } from "@/server/auth/errors";
+import { isCatalogError } from "@/server/catalog/errors";
+import { isImportFileError } from "@/server/import/errors";
 import { CsrfError } from "@/lib/http/csrf";
 
 /**
@@ -32,6 +34,14 @@ export function toErrorResponse(error: unknown) {
     const response = apiError(error.code, error.publicMessage, error.status, details);
     if (headers) response.headers.set("retry-after", headers["retry-after"]);
     return response;
+  }
+
+  if (isCatalogError(error)) {
+    return apiError(error.code, error.publicMessage, error.status, error.details);
+  }
+
+  if (isImportFileError(error)) {
+    return apiError(error.code, error.publicMessage, error.status);
   }
 
   if (error instanceof CsrfError) {

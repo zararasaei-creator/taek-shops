@@ -150,40 +150,79 @@ tightening `style-src` off `'unsafe-inline'`.
 
 ---
 
-## Phase 4 — Catalogue (admin CRUD + storefront read) ⬜
+## Phase 4 — Catalogue, inventory, admin management & import foundation 🚧 _(awaiting CTO review, 2026-09-05)_
 
-**Scope**
+Per the Phase 4 CTO brief this phase absorbed the inventory adjustment domain
+(was Phase 5) and the CSV import foundation (was Phase 10). Full design:
+[`docs/catalog.md`](catalog.md).
 
-- Admin: create/edit categories, brands, products, variants, typed attributes.
-- Storefront: category listing, product detail, variant selection, CAD pricing
-  display, `compareAtPrice` "was" price.
-- Faceted filtering (size, colour, gender, age group, brand, product type).
-- Accessible, responsive components; SEO metadata; sitemap.
+**Scope (delivered)**
+
+- **Catalogue services** (`src/server/catalog/`): brand, category (tree +
+  cycle checks), product (lifecycle `DRAFT/ACTIVE/ARCHIVED`), normalised
+  options/values, variants (unique SKU, complete option coverage, no duplicate
+  combinations — enforced app + DB), images. All authorization server-side.
+- **Public storefront query layer** (`catalog-queries.ts`) — status-filtered so
+  drafts/archived products can never be exposed. (Storefront _pages_ remain a
+  later phase.)
+- **Inventory domain** (`src/server/inventory/`): single `adjustInventory` entry
+  point (delta / set, reason, movement type, reference), transactional, on-hand
+  never negative / never below reserved, every change writes a `StockMovement` +
+  `AuditLog`. Order-flow primitives (reserve/release/commit/restock) implemented,
+  not yet wired to orders.
+- **Image-storage abstraction** (`src/server/storage/`): `ObjectStorage`
+  interface + local dev backend + `GET /api/media`. S3 backend deferred.
+- **CSV product import** (`src/server/import/`): file/header/row validation,
+  normalisation, dry-run preview (zero writes), row-level errors, per-row
+  transactional commit with upsert-by-SKU, summary, `ImportJob`/`ImportJobRow`
+  audit trail, formula-injection defence, idempotency. XLSX deferred (seam in
+  place). Template: `docs/product-import-template.csv`.
+- **Additive schema change** — `ProductVariant.optionSignature` +
+  `@@unique([productId, optionSignature])` (migration
+  `20260905000000_phase4_catalog`). No Phase 2/3 model changed.
+- **Admin UI** under `/admin/catalog` (products list/create/edit, brands,
+  categories, inventory, import) — server components + server actions.
+- 20 new AuditLog action constants; 64 new unit tests; 5 new e2e checks.
 
 **Acceptance criteria**
 
-- [ ] Admin can create a product with ≥2 variants and see it on the storefront.
-- [ ] Filters produce correct result sets (integration tests).
-- [ ] Product pages pass an automated accessibility check (axe) with no serious violations.
-- [ ] Lighthouse/perf budget for product page met (documented threshold).
-- [ ] e2e: browse → product → select variant.
-- [ ] Full verification pipeline green.
+- [x] Admin can create a product with ≥ 2 variants (unit + UI); duplicate SKU and
+      duplicate option combinations are rejected (unit + DB constraint).
+- [x] Integer-cent money throughout; `parseAmountToCents` covered.
+- [x] Inventory can only change through the adjustment service; invalid
+      transitions blocked (unit).
+- [x] CSV validation, dry-run (no writes), invalid-row isolation, normalisation
+      covered (unit).
+- [x] Authorization enforced in every catalog/inventory/import mutation (unit +
+      e2e 401/403/CSRF).
+- [x] `typecheck`, `lint`, `prettier`, `next build`, `prisma validate/generate`,
+      **181** unit tests, **13** e2e — all green.
+- [ ] **Blocked (no Docker/PostgreSQL):** `migrate deploy`, seed, DB-backed
+      integration/e2e for catalogue CRUD, variant constraints, inventory
+      transactions, and the import preview→commit→re-import idempotency round
+      trip. Release-blocking; carried to the Phase 5 pre-flight.
+- [ ] Storefront pages, faceted filtering UI, accessibility/perf budgets — not in
+      this phase's scope (public query layer is done and tested).
 
 ---
 
-## Phase 5 — Inventory ⬜
+## Phase 5 — Inventory (hardening) ⬜
+
+The inventory adjustment domain, ledger, low-stock view, and order-flow
+primitives were delivered in Phase 4 (`src/server/inventory/`). Remaining:
 
 **Scope**
 
-- `InventoryItem` + `StockMovement` ledger; `available` derivation.
-- Admin: adjust stock (writes a movement + audit), low-stock view.
-- Domain `InventoryService` (receive / adjust / reserve / release / commit).
+- Concurrency: conditional updates / row locks so parallel reservations cannot
+  oversell (needs a real DB to test).
+- Property test: `onHand` reconciles with the sum of `StockMovement.quantityDelta`.
+- Wire the reserve/release/commit/restock primitives into order placement /
+  cancellation (Phase 6+).
 
 **Acceptance criteria**
 
-- [ ] `onHand` always equals the sum of movements (property test).
-- [ ] Concurrent reservation cannot oversell (integration test with parallel txns).
-- [ ] Low-stock threshold surfaces items correctly.
+- [ ] Concurrent reservation cannot oversell (integration test, parallel txns).
+- [ ] `onHand` == sum of movements (property test against a real DB).
 - [ ] Full verification pipeline green.
 
 ---

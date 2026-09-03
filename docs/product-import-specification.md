@@ -1,9 +1,16 @@
 # Taek Shops — Product Import Specification
 
-> Status: **Specification (Phase 1)**. Defines the spreadsheet contract and rules
-> for the admin CSV/XLSX product importer. Implementation is scheduled for
-> Phase 10 of `docs/implementation-roadmap.md`. Column names and rules here are a
-> proposal for CTO review and may be adjusted before implementation.
+> Status: **Full future specification.** Defines the eventual CSV/XLSX importer
+> (column mapping, 22 columns, XLSX, image fetching, etc.).
+>
+> **Phase 4 shipped a CSV foundation** — a documented subset of this: CSV only,
+> ~20 columns using an `option1/2/3` pattern, no column-mapping UI, external
+> `image_url` references only. As-built behaviour and the Phase 4 column set are
+> in [`docs/catalog.md`](catalog.md) § "Product import workflow (CSV)"; the
+> template is `docs/product-import-template.csv`. The remaining items below
+> (XLSX, heading mapping, in-file image download, the full column set) are later
+> phases. The pipeline was built format-agnostic so they slot in without a
+> redesign.
 
 ## 1. Purpose & scope
 
