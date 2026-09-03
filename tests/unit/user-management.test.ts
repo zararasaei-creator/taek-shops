@@ -2,8 +2,19 @@
 import { UserRole, UserStatus } from "@prisma/client";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { ForbiddenError, SelfRoleChangeError, UnauthenticatedError } from "@/server/auth/errors";
-import { changeUserRole, listUsers, setAccountStatus } from "@/server/users/user-management";
+import {
+  ForbiddenError,
+  SelfRoleChangeError,
+  UnauthenticatedError,
+  WeakPasswordError,
+} from "@/server/auth/errors";
+import { verifyPassword } from "@/server/auth/password";
+import {
+  adminCreateUser,
+  changeUserRole,
+  listUsers,
+  setAccountStatus,
+} from "@/server/users/user-management";
 import { createMockPrisma, type MockPrisma } from "./helpers/mock-prisma";
 import { makeUser } from "./helpers/fixtures";
 
@@ -87,5 +98,92 @@ describe("user management authorization", () => {
     await expect(
       setAccountStatus(admin, { userId: admin.id, status: UserStatus.DEACTIVATED }, db),
     ).rejects.toBeInstanceOf(ForbiddenError);
+  });
+});
+
+describe("adminCreateUser", () => {
+  let db: MockPrisma;
+
+  beforeEach(() => {
+    db = createMockPrisma();
+    db.auditLog.create.mockResolvedValue({ id: "a" } as never);
+  });
+
+  it("requires an authenticated ADMIN (401 / 403)", async () => {
+    await expect(
+      adminCreateUser(null, { email: "new@example.com", role: UserRole.STAFF }, db),
+    ).rejects.toBeInstanceOf(UnauthenticatedError);
+    for (const actor of [staff, manager]) {
+      await expect(
+        adminCreateUser(actor, { email: "new@example.com", role: UserRole.STAFF }, db),
+      ).rejects.toBeInstanceOf(ForbiddenError);
+    }
+    expect(db.user.create).not.toHaveBeenCalled();
+  });
+
+  it("hashes the temporary password (never stores plaintext) and starts INVITED", async () => {
+    db.user.create.mockResolvedValue(
+      makeUser({
+        id: "new_1",
+        email: "new@example.com",
+        role: UserRole.STAFF,
+        status: UserStatus.INVITED,
+      }) as never,
+    );
+
+    const created = await adminCreateUser(
+      admin,
+      { email: "new@example.com", role: UserRole.STAFF, temporaryPassword: "temp-strong-pass-1" },
+      db,
+    );
+
+    expect(created.status).toBe(UserStatus.INVITED);
+    expect("passwordHash" in created).toBe(false);
+
+    const data = db.user.create.mock.calls[0]![0].data as { passwordHash: string; status: string };
+    expect(data.passwordHash).toMatch(/^\$argon2id\$/);
+    expect(data.passwordHash).not.toContain("temp-strong-pass-1");
+    expect(await verifyPassword(data.passwordHash, "temp-strong-pass-1")).toBe(true);
+    expect(data.status).toBe(UserStatus.INVITED);
+  });
+
+  it("records a user.created audit event with no secrets", async () => {
+    db.user.create.mockResolvedValue(
+      makeUser({ id: "new_2", role: UserRole.MANAGER, status: UserStatus.INVITED }) as never,
+    );
+
+    await adminCreateUser(
+      admin,
+      { email: "mgr@example.com", role: UserRole.MANAGER, temporaryPassword: "temp-strong-pass-2" },
+      db,
+    );
+
+    const audit = db.auditLog.create.mock.calls.at(-1)![0].data as {
+      action: string;
+      actorUserId: string;
+      metadata: Record<string, unknown>;
+    };
+    expect(audit.action).toBe("user.created");
+    expect(audit.actorUserId).toBe(admin.id);
+    expect(audit.metadata).toEqual({ role: UserRole.MANAGER, status: "INVITED" });
+    expect(JSON.stringify(audit)).not.toContain("temp-strong-pass-2");
+    expect(JSON.stringify(audit)).not.toMatch(/\$argon2id\$/);
+  });
+
+  it("allows creation without a temporary password (passwordHash null)", async () => {
+    db.user.create.mockResolvedValue(makeUser({ id: "new_3" }) as never);
+    await adminCreateUser(admin, { email: "invite@example.com", role: UserRole.STAFF }, db);
+    const data = db.user.create.mock.calls[0]![0].data as { passwordHash: string | null };
+    expect(data.passwordHash).toBeNull();
+  });
+
+  it("rejects a weak temporary password", async () => {
+    await expect(
+      adminCreateUser(
+        admin,
+        { email: "weak@example.com", role: UserRole.STAFF, temporaryPassword: "password123" },
+        db,
+      ),
+    ).rejects.toBeInstanceOf(WeakPasswordError);
   });
 });

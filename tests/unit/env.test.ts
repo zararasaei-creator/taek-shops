@@ -37,6 +37,26 @@ describe("environment configuration", () => {
     expect(serverEnv.IMPORT_MAX_ROW_COUNT).toBe(250);
   });
 
+  it("applies OWASP Argon2id defaults and coerces overrides", async () => {
+    const { serverEnv } = await import("@/server/config/env");
+    expect(serverEnv.AUTH_ARGON_MEMORY_KIB).toBe(19456);
+    expect(serverEnv.AUTH_ARGON_TIME_COST).toBe(2);
+    expect(serverEnv.AUTH_ARGON_PARALLELISM).toBe(1);
+
+    vi.stubEnv("AUTH_ARGON_MEMORY_KIB", "65536");
+    vi.resetModules();
+    const reloaded = await import("@/server/config/env");
+    expect(reloaded.serverEnv.AUTH_ARGON_MEMORY_KIB).toBe(65536);
+  });
+
+  it("rejects an AUTH_SECRET shorter than 16 characters", async () => {
+    vi.stubEnv("AUTH_SECRET", "tooshort");
+    vi.resetModules();
+    await expect(import("@/server/config/env")).rejects.toThrow(
+      /Invalid server environment configuration/,
+    );
+  });
+
   it("rejects a missing DATABASE_URL", async () => {
     vi.stubEnv("DATABASE_URL", undefined);
     vi.resetModules();

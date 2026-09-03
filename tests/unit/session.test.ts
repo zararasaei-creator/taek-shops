@@ -27,6 +27,25 @@ describe("session lifecycle", () => {
     expect(new Date(created.expiresAt).getTime()).toBeGreaterThan(Date.now());
   });
 
+  it("stamps lastLoginAt on the user when a session is issued", async () => {
+    const before = Date.now();
+    await issueSession("user_1", {}, db);
+
+    expect(db.user.update).toHaveBeenCalledWith({
+      where: { id: "user_1" },
+      data: { lastLoginAt: expect.any(Date) },
+    });
+    const stamped = db.user.update.mock.calls[0]![0].data as { lastLoginAt: Date };
+    expect(stamped.lastLoginAt.getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  it("still issues a session if the lastLoginAt stamp fails (best-effort)", async () => {
+    db.user.update.mockRejectedValueOnce(new Error("transient"));
+    await expect(issueSession("user_1", {}, db)).resolves.toMatchObject({
+      rawToken: expect.any(String),
+    });
+  });
+
   it("validates an active session and returns the DB-sourced user", async () => {
     const user = makeUser({ id: "user_1", role: "ADMIN" });
     db.session.findUnique.mockResolvedValue({
