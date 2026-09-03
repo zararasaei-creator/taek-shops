@@ -170,9 +170,16 @@ async function seedDemoProduct(categoryIds: Map<string, string>) {
   ];
 
   for (const [index, spec] of variantSpecs.entries()) {
+    const sizeValueId = optionValueIds.get(`Size:${spec.size}`)!;
+    const colourValueId = optionValueIds.get(`Colour:${spec.colour}`)!;
+    // Mirrors src/server/catalog/option-signature.ts (seed cannot import the `@/`
+    // alias). Required so `@@unique([productId, optionSignature])` distinguishes
+    // the four variants instead of collapsing them onto the column default "".
+    const signature = [...new Set([sizeValueId, colourValueId])].sort().join("|");
+
     const variant = await prisma.productVariant.upsert({
       where: { sku: spec.sku },
-      update: { priceCents: spec.priceCents, active: true },
+      update: { priceCents: spec.priceCents, active: true, optionSignature: signature },
       create: {
         productId: product.id,
         sku: spec.sku,
@@ -182,6 +189,7 @@ async function seedDemoProduct(categoryIds: Map<string, string>) {
         compareAtPriceCents: spec.priceCents + 1000,
         currency: "CAD",
         weightGrams: 650,
+        optionSignature: signature,
       },
     });
 
