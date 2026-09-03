@@ -30,6 +30,12 @@ test("import template download requires authentication", async ({ request }) => 
   expect(response.status()).toBe(401);
 });
 
+test("inventory health endpoint requires authentication", async ({ request }) => {
+  const response = await request.get("/api/admin/inventory/health");
+  expect(response.status()).toBe(401);
+  expect((await response.json()).error.code).toBe("unauthenticated");
+});
+
 test("media route rejects path traversal", async ({ request }) => {
   const response = await request.get("/api/media/..%2f..%2fpackage.json");
   expect([400, 404]).toContain(response.status());

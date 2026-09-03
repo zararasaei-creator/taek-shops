@@ -8,6 +8,9 @@ const baseURL = `http://localhost:${PORT}`;
  * handlers are not compiled lazily on first hit — that made parallel first
  * requests flaky. For fast local iteration, start `npm run dev` yourself first;
  * `reuseExistingServer` will pick it up.
+ *
+ * `next start` is the correct command here now that `output: "standalone"` is no
+ * longer set in `next.config.ts` (see the note there).
  */
 export default defineConfig({
   testDir: "./tests/e2e",

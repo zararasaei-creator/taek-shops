@@ -6,9 +6,11 @@ phase may be marked complete on the basis of scaffolding alone.
 
 **Verification pipeline** (run for every phase):
 `npm ci` → `npm run format:check` → `npm run lint` → `npm run typecheck` →
-`npm run test` → `npm run build` (+ `npm run test:e2e` from Phase 3 on).
+`npm run test` → `npm run build`. Add `npm run test:e2e` from Phase 3 on, and
+`npm run test:integration` from Phase 5 on (needs `docker compose up -d` +
+`npm run db:deploy`).
 
-Legend: ✅ Complete · 🚧 In progress · ⬜ Not started
+Legend: ✅ Complete · 🚧 In progress / awaiting review · ⬜ Not started
 
 ---
 
@@ -225,39 +227,70 @@ Per the Phase 4 CTO brief this phase absorbed the inventory adjustment domain
 
 ---
 
-## Phase 5 — Inventory (hardening) ⬜
+## Phase 5 — Inventory (hardening) 🚧 _(awaiting CTO review, 2026-09-03)_
 
-The inventory adjustment domain, ledger, low-stock view, and order-flow
-primitives were delivered in Phase 4 (`src/server/inventory/`). Remaining:
+Full design: [`docs/catalog.md`](catalog.md) § "Concurrency & the ledger
+invariant" and [`src/server/orders/README.md`](../src/server/orders/README.md).
 
-**Pre-work carried from the Phase 5 pre-flight (2026-09-03)**
+**Scope (delivered)**
 
-- **`output: "standalone"` vs `next start` mismatch.** `next.config.ts` sets
-  `output: "standalone"` while `package.json` `start` and `playwright.config.ts`
-  both invoke `next start`; Next 16 warns this pairing is unsupported. Currently
-  non-fatal (served all e2e + manual pre-flight checks) but a latent Phase 13
-  deployment problem and a possible e2e-flakiness source. Decide: switch the
-  scripts to `node .next/standalone/server.js`, or drop `output: "standalone"`
-  until Phase 13. Not a code change to make mid-Phase-5-feature-work.
-- Add the automated e2e for the authenticated sign-in → session → logout flow
-  (verified manually in the pre-flight) alongside the DB-backed integration
-  suite below.
-- Run a clean `npm ci` in CI before Phase 5 sign-off (the pre-flight reused the
-  existing `node_modules`).
+- **Row locking** (`src/server/inventory/inventory-lock.ts`) — every stock
+  mutation opens a transaction and takes `SELECT … FOR UPDATE OF "InventoryItem"`
+  before reading counters. Parallel writers to the same variant serialize;
+  overselling and lost updates are impossible under READ COMMITTED.
+- **Two-column ledger** — `StockMovement.reservedDelta` added alongside
+  `quantityDelta`, so **both** counters reconcile against the append-only ledger
+  (`quantityOnHand == SUM(quantityDelta)`,
+  `quantityReserved == SUM(reservedDelta)`). `src/server/inventory/invariant.ts`
+  recomputes and reports drift; surfaced at `GET /api/admin/inventory/health`.
+- **Database CHECK constraints** on `InventoryItem` (on-hand ≥ 0, reserved ≥ 0,
+  reserved ≤ on-hand) — a backstop under the application rules.
+- **Idempotent movements** — `StockMovement.idempotencyKey` (unique); the order
+  primitives pass `order:<id>:<op>:<variantId>` so a replayed operation is a
+  no-op, never a duplicate movement.
+- **Order lifecycle wiring** (`src/server/orders/order-inventory.ts`) —
+  `reserveOrderStock` / `commitOrderStock` / `releaseOrderStock` /
+  `restockOrderStock`, each atomic across all lines, deadlock-free
+  (ascending-`variantId` lock order), authorized (`order.write`).
+  `applyOrderStatusTransition` validates an `OrderStatus` transition against a
+  small state machine and applies the matching inventory effect + status write
+  in one transaction. Order _creation_ stays Phase 6; the full state machine
+  stays Phase 8.
+- Additive migration `20260906000000_phase5_inventory` (2 columns, 1 unique
+  index, 3 CHECK constraints). No Phase 2–4 model altered.
+- **Pre-work resolved:** `output: "standalone"` dropped from `next.config.ts`
+  (re-added in Phase 13 with the matching container start command) — removes the
+  `next start` warning; the authenticated sign-in → session → logout flow is now
+  an automated e2e (`tests/e2e/auth-session.spec.ts`, runs with
+  `E2E_ADMIN_EMAIL` / `E2E_ADMIN_PASSWORD`). `npm ci` in CI stays open (no CI
+  config exists yet — Phase 13).
 
-**Scope**
-
-- Concurrency: conditional updates / row locks so parallel reservations cannot
-  oversell (needs a real DB to test).
-- Property test: `onHand` reconciles with the sum of `StockMovement.quantityDelta`.
-- Wire the reserve/release/commit/restock primitives into order placement /
-  cancellation (Phase 6+).
+**Deferred:** wiring these operations into an actual checkout / payment / refund
+flow (Phases 6–8); the `onHand` reconciliation as a scheduled job.
 
 **Acceptance criteria**
 
-- [ ] Concurrent reservation cannot oversell (integration test, parallel txns).
-- [ ] `onHand` == sum of movements (property test against a real DB).
-- [ ] Full verification pipeline green.
+- [x] Concurrent reservation cannot oversell — 50 parallel single-unit
+      reservations against 20 on-hand: exactly 20 succeed, 30 fail cleanly,
+      counter + ledger both land on 20
+      (`tests/integration/inventory-concurrency.integration.test.ts`).
+- [x] `onHand` == sum of movements — holds after **every** step of a
+      200-operation randomized sequence, and `reserved == SUM(reservedDelta)`
+      too; out-of-band corruption is detected
+      (`tests/integration/inventory-invariant.integration.test.ts`).
+- [x] Safe transaction semantics for receive / adjust / reserve / release /
+      commit / restock (`tests/integration/inventory-transactions.integration.test.ts`).
+- [x] reserve/release/commit/restock wired into order placement + status
+      transitions; atomic, idempotent, no partial reserve
+      (`tests/integration/order-inventory.integration.test.ts`).
+- [x] Negative inventory, overselling, duplicate movements, race corruption, and
+      inconsistent `onHand` are all prevented (unit + integration + DB CHECK).
+- [x] `lint`, `typecheck`, **193** unit tests, **27** integration tests, **14**
+      e2e (+1 authenticated e2e that runs with seed creds), `next build`,
+      `prisma validate` / migration idempotency — all green against live
+      PostgreSQL.
+- [x] Phase 1–4 behaviour preserved (all prior tests green; no Phase 2–4 model
+      changed).
 
 ---
 

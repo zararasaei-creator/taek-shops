@@ -1,8 +1,10 @@
 # Taek Shops — Catalogue, Inventory & Import
 
-> Status: **Phase 4 implemented.** Product catalogue, variants/options, inventory
-> adjustment, admin management UI, image-storage abstraction, and the CSV import
-> foundation. Cart, checkout, orders, and payments are later phases.
+> Status: **Phases 4–5 implemented.** Product catalogue, variants/options, admin
+> management UI, image-storage abstraction, the CSV import foundation, and the
+> hardened inventory domain (row-locked transactions, reconcilable two-column
+> ledger, DB CHECK constraints, order-lifecycle wiring). Cart, checkout, orders,
+> and payments are later phases.
 
 ## 1. Catalogue architecture
 
@@ -96,24 +98,57 @@ There are no ad-hoc `quantityOnHand` writes elsewhere.
   `INITIAL`), and an optional `reference`.
 - Runs in a transaction: reads the item, computes the delta, updates
   `quantityOnHand`, writes a `StockMovement`, all atomically.
-- **Hard rules — never silently violated:**
+- **Hard rules — never silently violated** (enforced in the service **and** by
+  `CHECK` constraints on `InventoryItem`, migration `20260906000000_phase5_inventory`):
   - `quantityOnHand` is never negative;
+  - `quantityReserved` is never negative;
   - `quantityOnHand` is never dropped below `quantityReserved` (that would make
     an existing reservation unfulfillable);
   - `available = quantityOnHand − quantityReserved` is derived, never stored;
   - quantities are integers.
 - Every adjustment writes an `AuditLog` entry (`inventory.adjusted` /
   `inventory.received`).
-- **`StockMovement.quantityDelta` is the change to `quantityOnHand`.**
-  Reservation / release movements carry `quantityDelta = 0` (they change
-  `quantityReserved`, not on-hand); a sale carries a negative delta.
 
-### Order-flow primitives (implemented, not yet wired to orders)
+### Concurrency & the ledger invariant (Phase 5)
+
+- **Row locking.** Every mutating transaction calls `lockInventoryItem` first —
+  `SELECT … FOR UPDATE OF "InventoryItem"`. Concurrent writers to the same
+  variant serialize on that lock, so the availability check and the write that
+  depends on it are atomic. Overselling and lost updates are impossible;
+  READ COMMITTED plus the lock is sufficient (no SERIALIZable retries).
+- **Two-column ledger.** `StockMovement` carries a signed `quantityDelta`
+  (on-hand) **and** `reservedDelta` (reserved). Both counters are fully
+  reconstructable:
+
+  ```
+  quantityOnHand   == SUM(quantityDelta)
+  quantityReserved == SUM(reservedDelta)
+  ```
+
+  | Movement                    | quantityDelta | reservedDelta |
+  | --------------------------- | ------------- | ------------- |
+  | INITIAL / PURCHASE / RETURN | +qty          | 0             |
+  | ADJUSTMENT                  | ±qty          | 0             |
+  | RESERVATION                 | 0             | +qty          |
+  | RELEASE                     | 0             | −qty          |
+  | SALE (commit)               | −qty          | −qty          |
+
+  `GET /api/admin/inventory/health` reconciles every item against this invariant
+  (`src/server/inventory/invariant.ts`).
+
+- **Idempotent movements.** The order primitives pass a deterministic
+  `StockMovement.idempotencyKey` (`order:<id>:<op>:<variantId>`, unique index);
+  a replayed operation is a no-op, never a duplicate movement.
+
+### Order-flow primitives (wired to the order lifecycle in Phase 5)
 
 `reserveStockTx`, `releaseReservationTx`, `commitReservationTx`, `restockTx`,
-`setOnHandTx` — transaction-composable functions the future order flow calls to
-reserve on placement, release on cancellation, commit on fulfilment, and restock
-on refund. Building the order lifecycle will not require reworking this domain.
+`setOnHandTx` — transaction-composable, all row-locked and idempotency-aware.
+`src/server/orders/order-inventory.ts` composes them into per-order operations
+(`reserveOrderStock` / `commitOrderStock` / `releaseOrderStock` /
+`restockOrderStock`) and `applyOrderStatusTransition`, which validates an
+`OrderStatus` transition and applies the matching inventory effect atomically.
+Order _creation_ and the full order state machine remain Phase 6 / Phase 8.
 
 ## 5. Admin catalogue UI
 
@@ -282,14 +317,13 @@ Phase 2 + Phase 3 migrations.
 
 ## 12. Live database verification status
 
-**Still outstanding — release-blocking.** No Docker / PostgreSQL was available in
-any implementation environment. Not executed against a real database:
-`prisma migrate deploy`, seeding, and DB-backed integration / e2e for catalogue
-CRUD, variant constraints, inventory transactions, and the full import
-preview→commit→re-import (idempotency) round trip.
+**Resolved.** The Phase 5 pre-flight (2026-09-03) ran `prisma migrate deploy`,
+seeding, and DB-backed verification of catalogue CRUD, variant constraints,
+inventory transactions, and the import preview→commit→re-import round trip
+against the local docker-compose PostgreSQL.
 
-Covered instead: 64 Phase 4 unit tests (mocked Prisma) for authorization,
-validation, SKU uniqueness, duplicate-variant prevention, option coverage,
-inventory rules, CSV parsing/sanitisation/normalisation, and import
-dry-run/guard behaviour; plus 5 DB-free e2e checks (auth redirects, 401s, CSRF,
-path-traversal).
+Phase 5 adds a standing database-backed suite (`npm run test:integration`,
+`tests/integration/`): inventory transaction semantics, concurrency (no
+oversell under parallel reservations), the ledger invariant, and the
+order→inventory lifecycle. Run `docker compose up -d && npm run db:deploy`
+first.

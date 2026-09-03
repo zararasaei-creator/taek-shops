@@ -4,13 +4,14 @@ A secure, maintainable, responsive, multilingual-ready **Canadian e-commerce
 platform** for taekwondo uniforms, belts, protective gear, training equipment,
 and accessories.
 
-> **Project status: Phases 1–4 complete; Phase 5 (inventory hardening) next.**
-> The toolchain, Prisma/PostgreSQL schema, auth/RBAC/audit, the product
-> catalogue domain, admin management UI (`/admin/catalog`), inventory adjustment
-> service, image-storage abstraction, and CSV product importer are in place and
-> were verified against a live PostgreSQL database in the Phase 5 pre-flight
-> (2026-09-03). Storefront pages, cart, checkout, and payments are planned work
-> — see the roadmap.
+> **Project status: Phases 1–4 complete; Phase 5 (inventory hardening) awaiting
+> CTO review.** The toolchain, Prisma/PostgreSQL schema, auth/RBAC/audit, the
+> product catalogue domain, admin management UI (`/admin/catalog`), CSV product
+> importer, and the hardened inventory domain (row-locked transactions, a
+> two-column reconcilable ledger, DB CHECK constraints, and the
+> reserve/commit/release/restock order-lifecycle wiring) are in place and
+> verified against a live PostgreSQL database. Storefront pages, cart, checkout,
+> and payments are planned work — see the roadmap.
 
 ## Documentation
 
@@ -89,7 +90,7 @@ See [architecture.md](docs/architecture.md) § "Database architecture" and
 | Command                | What it does                                        |
 | ---------------------- | --------------------------------------------------- |
 | `npm run dev`          | Start the dev server (http://localhost:3000)        |
-| `npm run build`        | Production build (`output: "standalone"`)           |
+| `npm run build`        | Production build                                    |
 | `npm start`            | Run the production build (after `npm run build`)    |
 | `npm run lint`         | ESLint                                              |
 | `npm run lint:fix`     | ESLint with autofix                                 |
@@ -113,14 +114,19 @@ See [architecture.md](docs/architecture.md) § "Database architecture" and
 
 ## Test commands
 
-| Command               | What it does                                        |
-| --------------------- | --------------------------------------------------- |
-| `npm run test`        | Vitest unit/component tests (single run)            |
-| `npm run test:watch`  | Vitest in watch mode                                |
-| `npm run test:e2e`    | Playwright end-to-end tests (starts the dev server) |
-| `npm run test:e2e:ui` | Playwright in UI mode                               |
+| Command                    | What it does                                                      |
+| -------------------------- | ----------------------------------------------------------------- |
+| `npm run test`             | Vitest unit/component tests (mocked Prisma, single run)           |
+| `npm run test:watch`       | Vitest in watch mode                                              |
+| `npm run test:integration` | DB-backed integration tests (needs Docker Postgres + `db:deploy`) |
+| `npm run test:e2e`         | Playwright end-to-end tests (starts the dev server)               |
+| `npm run test:e2e:ui`      | Playwright in UI mode                                             |
 
 > First e2e run only: `npx playwright install` to download browser binaries.
+>
+> `test:integration` needs a live database: `docker compose up -d && npm run db:deploy`.
+> The authenticated-flow e2e (`auth-session.spec.ts`) runs only when
+> `E2E_ADMIN_EMAIL` / `E2E_ADMIN_PASSWORD` are set to a seeded admin.
 
 ## Build command
 
@@ -132,6 +138,8 @@ npm run build
 
 ```bash
 npm ci && npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build
+# from Phase 5 on, with Docker Postgres running (docker compose up -d && npm run db:deploy):
+npm run test:integration && npm run test:e2e
 ```
 
 ## Project structure
@@ -153,7 +161,8 @@ src/
     audit/               Generic append-only audit log + sanitisation
     users/               Admin user-management services (server-enforced)
     catalog/             Brand/category/product/variant/option/image services + public queries
-    inventory/           Controlled stock adjustment + order-flow primitives
+    inventory/           Row-locked stock transactions, reconcilable ledger, invariant check
+    orders/              Order-lifecycle → inventory wiring (reserve/commit/release/restock)
     storage/             ObjectStorage interface + local dev backend
     import/              CSV product import (parse -> validate -> preview -> commit)
     domain/money.ts      Integer-cents money helper
@@ -164,9 +173,10 @@ prisma/
   seed.ts                Synthetic development seed
 prisma.config.ts         Prisma CLI configuration
 tests/
-  unit/                  Vitest (schema invariants, money, env, client)
+  unit/                  Vitest, mocked Prisma (services, schema invariants, money, env)
+  integration/           Vitest, live Postgres (inventory transactions, concurrency, invariant, order lifecycle)
   e2e/                   Playwright
-docs/                    Architecture, roadmap, import spec
+docs/                    Architecture, roadmap, catalog/inventory, import spec, security
 infra/                   Deployment assets
 docker-compose.yml       Local PostgreSQL
 ```

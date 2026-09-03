@@ -5,28 +5,39 @@ import { requirePermission, type AuthUser } from "@/server/auth/authorization";
 import { recordAudit } from "@/server/audit/audit-service";
 import { AUDIT_ACTIONS } from "@/server/audit/actions";
 import { InventoryRuleError, NotFoundError } from "@/server/catalog/errors";
-import type { CatalogTxClient } from "@/server/catalog/tx";
 import { inventoryAdjustSchema, type InventoryAdjustInput } from "@/lib/validation/catalog";
+import {
+  lockInventoryItem,
+  movementExists,
+  type InventoryTx,
+  type LockedInventoryItem,
+} from "@/server/inventory/inventory-lock";
 
 /**
  * The single controlled entry point for stock changes.
  *
- * Rules (never silently violated):
+ * Rules (never silently violated — enforced in this module AND by CHECK
+ * constraints on `InventoryItem`):
  * - `quantityOnHand` is never negative;
+ * - `quantityReserved` is never negative;
  * - `quantityOnHand` is never dropped below `quantityReserved` (that would make
  *   an existing reservation unfulfillable);
  * - every change writes an append-only `StockMovement` in the same transaction
- *   as the counter update;
+ *   as the counter update, carrying the signed `quantityDelta` (on-hand) and
+ *   `reservedDelta` (reserved) so both counters reconcile against the ledger;
  * - `available = quantityOnHand - quantityReserved` is derived, never stored.
  *
+ * Concurrency: every mutation opens a transaction and takes a `FOR UPDATE` row
+ * lock on the `InventoryItem` (`lockInventoryItem`) before reading counters, so
+ * parallel writers to the same variant serialize and cannot oversell.
+ *
  * Order placement / cancellation call `reserveStockTx` / `releaseReservationTx` /
- * `commitReservationTx` / `restockTx` — the same primitives, so the order flow
- * can be built later without touching this domain.
+ * `commitReservationTx` / `restockTx` — the same primitives, wired up in
+ * `src/server/orders/order-inventory.ts`.
  */
 
 type Db = PrismaClient;
 type Actor = AuthUser | null | undefined;
-type ItemTx = Pick<CatalogTxClient, "inventoryItem" | "stockMovement" | "productVariant">;
 
 interface Meta {
   ipAddress?: string | null;
@@ -44,6 +55,24 @@ export interface InventoryLevel {
   belowReorderLevel: boolean;
 }
 
+function levelFromCounters(
+  item: Pick<LockedInventoryItem, "id" | "variantId" | "sku" | "reorderLevel">,
+  onHand: number,
+  reserved: number,
+): InventoryLevel {
+  const available = onHand - reserved;
+  return {
+    variantId: item.variantId,
+    sku: item.sku,
+    inventoryItemId: item.id,
+    onHand,
+    reserved,
+    available,
+    reorderLevel: item.reorderLevel,
+    belowReorderLevel: item.reorderLevel != null && available <= item.reorderLevel,
+  };
+}
+
 function toLevel(row: {
   id: string;
   quantityOnHand: number;
@@ -51,17 +80,11 @@ function toLevel(row: {
   reorderLevel: number | null;
   variant: { id: string; sku: string };
 }): InventoryLevel {
-  const available = row.quantityOnHand - row.quantityReserved;
-  return {
-    variantId: row.variant.id,
-    sku: row.variant.sku,
-    inventoryItemId: row.id,
-    onHand: row.quantityOnHand,
-    reserved: row.quantityReserved,
-    available,
-    reorderLevel: row.reorderLevel,
-    belowReorderLevel: row.reorderLevel != null && available <= row.reorderLevel,
-  };
+  return levelFromCounters(
+    { id: row.id, variantId: row.variant.id, sku: row.variant.sku, reorderLevel: row.reorderLevel },
+    row.quantityOnHand,
+    row.quantityReserved,
+  );
 }
 
 const levelSelect = {
@@ -72,76 +95,80 @@ const levelSelect = {
   variant: { select: { id: true, sku: true } },
 } satisfies Prisma.InventoryItemSelect;
 
-async function loadItemForUpdate(
-  tx: ItemTx,
+/** Resolve a `{ sku }` or `{ variantId }` selector to a variant id. */
+async function resolveVariantId(
+  tx: Pick<InventoryTx, "productVariant">,
   where: { variantId: string } | { sku: string },
-): Promise<{
-  id: string;
-  quantityOnHand: number;
-  quantityReserved: number;
-  reorderLevel: number | null;
-  variant: { id: string; sku: string };
-}> {
-  const variantId =
-    "variantId" in where
-      ? where.variantId
-      : (
-          await tx.productVariant.findUnique({
-            where: { sku: where.sku },
-            select: { id: true },
-          })
-        )?.id;
-
-  if (!variantId) throw new NotFoundError("Variant", "sku" in where ? where.sku : where.variantId);
-
-  const item = await tx.inventoryItem.findUnique({ where: { variantId }, select: levelSelect });
-  if (!item) throw new NotFoundError("Inventory item", variantId);
-  return item;
+): Promise<string> {
+  if ("variantId" in where) return where.variantId;
+  const variant = await tx.productVariant.findUnique({
+    where: { sku: where.sku },
+    select: { id: true },
+  });
+  if (!variant) throw new NotFoundError("Variant", where.sku);
+  return variant.id;
 }
 
-/** Apply a signed change to on-hand stock + write the movement. Enforces the rules. */
-async function applyOnHandDeltaTx(
-  tx: ItemTx,
-  itemId: string,
-  currentOnHand: number,
-  currentReserved: number,
-  delta: number,
-  movement: {
-    type: StockMovementType;
-    variantId: string;
-    reason: string;
-    reference?: string | null;
-    actorId?: string | null;
-  },
-): Promise<number> {
-  const nextOnHand = currentOnHand + delta;
+export interface MovementSpec {
+  type: StockMovementType;
+  /** Signed change to on-hand. */
+  quantityDelta: number;
+  /** Signed change to reserved. */
+  reservedDelta: number;
+  reason: string;
+  reference?: string | null;
+  actorId?: string | null;
+  idempotencyKey?: string | null;
+}
+
+/**
+ * Apply the counter changes described by `spec` to a locked inventory item and
+ * append the matching `StockMovement`, enforcing every hard rule. Assumes the
+ * caller already holds the `FOR UPDATE` lock on `item`.
+ */
+async function applyMovementTx(
+  tx: Pick<InventoryTx, "inventoryItem" | "stockMovement">,
+  item: LockedInventoryItem,
+  spec: MovementSpec,
+): Promise<{ onHand: number; reserved: number }> {
+  const nextOnHand = item.quantityOnHand + spec.quantityDelta;
+  const nextReserved = item.quantityReserved + spec.reservedDelta;
+
   if (nextOnHand < 0) {
     throw new InventoryRuleError(
-      `Adjustment would make on-hand stock negative (${currentOnHand} -> ${nextOnHand}).`,
+      `Change would make on-hand stock negative (${item.quantityOnHand} -> ${nextOnHand}) for ${item.sku}.`,
     );
   }
-  if (nextOnHand < currentReserved) {
+  if (nextReserved < 0) {
     throw new InventoryRuleError(
-      `Adjustment would leave ${currentReserved} reserved unit(s) unfulfillable (on-hand ${nextOnHand}).`,
+      `Change would make reserved stock negative (${item.quantityReserved} -> ${nextReserved}) for ${item.sku}.`,
+    );
+  }
+  if (nextReserved > nextOnHand) {
+    throw new InventoryRuleError(
+      `Change would leave ${nextReserved} reserved unit(s) unfulfillable (on-hand ${nextOnHand}) for ${item.sku}.`,
     );
   }
 
   await tx.inventoryItem.update({
-    where: { id: itemId },
-    data: { quantityOnHand: nextOnHand },
+    where: { id: item.id },
+    data: { quantityOnHand: nextOnHand, quantityReserved: nextReserved },
   });
   await tx.stockMovement.create({
     data: {
-      inventoryItemId: itemId,
-      variantId: movement.variantId,
-      type: movement.type,
-      quantityDelta: delta,
-      reason: movement.reason,
-      reference: movement.reference ?? null,
-      actorId: movement.actorId ?? null,
+      inventoryItemId: item.id,
+      variantId: item.variantId,
+      type: spec.type,
+      quantityDelta: spec.quantityDelta,
+      reservedDelta: spec.reservedDelta,
+      reason: spec.reason,
+      reference: spec.reference ?? null,
+      actorId: spec.actorId ?? null,
+      idempotencyKey: spec.idempotencyKey ?? null,
     },
   });
-  return nextOnHand;
+
+  return { onHand: nextOnHand, reserved: nextReserved };
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +209,7 @@ export async function listVariantMovements(
       id: true;
       type: true;
       quantityDelta: true;
+      reservedDelta: true;
       reason: true;
       reference: true;
       createdAt: true;
@@ -198,6 +226,7 @@ export async function listVariantMovements(
       id: true,
       type: true,
       quantityDelta: true,
+      reservedDelta: true,
       reason: true,
       reference: true,
       createdAt: true,
@@ -219,30 +248,26 @@ export async function adjustInventory(
   const input = inventoryAdjustSchema.parse(rawInput);
 
   const level = await db.$transaction(async (tx) => {
-    const item = await loadItemForUpdate(
+    const variantId = await resolveVariantId(
       tx,
       input.variantId ? { variantId: input.variantId } : { sku: input.sku! },
     );
+    const item = await lockInventoryItem(tx, variantId);
 
     const delta = input.delta !== undefined ? input.delta : input.setOnHand! - item.quantityOnHand;
-    if (delta === 0) return toLevel(item);
+    if (delta === 0) {
+      return levelFromCounters(item, item.quantityOnHand, item.quantityReserved);
+    }
 
-    const nextOnHand = await applyOnHandDeltaTx(
-      tx,
-      item.id,
-      item.quantityOnHand,
-      item.quantityReserved,
-      delta,
-      {
-        type: input.type,
-        variantId: item.variant.id,
-        reason: input.reason,
-        reference: input.reference,
-        actorId: authed.id,
-      },
-    );
-
-    return toLevel({ ...item, quantityOnHand: nextOnHand });
+    const { onHand, reserved } = await applyMovementTx(tx, item, {
+      type: input.type,
+      quantityDelta: delta,
+      reservedDelta: 0,
+      reason: input.reason,
+      reference: input.reference,
+      actorId: authed.id,
+    });
+    return levelFromCounters(item, onHand, reserved);
   });
 
   await recordAudit(
@@ -289,94 +314,96 @@ export async function setReorderLevel(
 }
 
 // ---------------------------------------------------------------------------
-// Primitives for the future order flow (transaction-composable)
+// Primitives for the order flow (transaction-composable)
+//
+// Each takes a transaction client, locks the row, enforces the rules, and
+// appends one movement. `idempotencyKey`, when supplied, makes the call a no-op
+// if a movement with that key already exists (safe replay for the order
+// lifecycle). Callers must already be inside `db.$transaction(...)`.
 // ---------------------------------------------------------------------------
 
+/** Increase `quantityReserved` after checking availability. */
 export async function reserveStockTx(
-  tx: ItemTx,
+  tx: InventoryTx,
   variantId: string,
   quantity: number,
   reference: string,
+  idempotencyKey?: string,
 ): Promise<void> {
-  if (quantity <= 0) throw new InventoryRuleError("Reservation quantity must be positive.");
-  const item = await loadItemForUpdate(tx, { variantId });
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new InventoryRuleError("Reservation quantity must be a positive integer.");
+  }
+  const item = await lockInventoryItem(tx, variantId);
+  if (idempotencyKey && (await movementExists(tx, idempotencyKey))) return;
+
   const available = item.quantityOnHand - item.quantityReserved;
   if (available < quantity) {
     throw new InventoryRuleError(
-      `Only ${available} unit(s) available for ${item.variant.sku}; cannot reserve ${quantity}.`,
+      `Only ${available} unit(s) available for ${item.sku}; cannot reserve ${quantity}.`,
     );
   }
-  await tx.inventoryItem.update({
-    where: { id: item.id },
-    data: { quantityReserved: item.quantityReserved + quantity },
-  });
-  await tx.stockMovement.create({
-    data: {
-      inventoryItemId: item.id,
-      variantId,
-      type: StockMovementType.RESERVATION,
-      quantityDelta: 0, // on-hand unchanged; reserved increased by `quantity`
-      reason: `Reserve ${quantity}`,
-      reference,
-    },
+  await applyMovementTx(tx, item, {
+    type: StockMovementType.RESERVATION,
+    quantityDelta: 0,
+    reservedDelta: quantity,
+    reason: `Reserve ${quantity}`,
+    reference,
+    idempotencyKey,
   });
 }
 
+/** Decrease `quantityReserved` (clamped to what is reserved). */
 export async function releaseReservationTx(
-  tx: ItemTx,
+  tx: InventoryTx,
   variantId: string,
   quantity: number,
   reference: string,
+  idempotencyKey?: string,
 ): Promise<void> {
-  if (quantity <= 0) throw new InventoryRuleError("Release quantity must be positive.");
-  const item = await loadItemForUpdate(tx, { variantId });
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new InventoryRuleError("Release quantity must be a positive integer.");
+  }
+  const item = await lockInventoryItem(tx, variantId);
+  if (idempotencyKey && (await movementExists(tx, idempotencyKey))) return;
+
   const release = Math.min(quantity, item.quantityReserved);
-  await tx.inventoryItem.update({
-    where: { id: item.id },
-    data: { quantityReserved: item.quantityReserved - release },
-  });
-  await tx.stockMovement.create({
-    data: {
-      inventoryItemId: item.id,
-      variantId,
-      type: StockMovementType.RELEASE,
-      quantityDelta: 0,
-      reason: `Release ${release}`,
-      reference,
-    },
+  if (release === 0) return;
+  await applyMovementTx(tx, item, {
+    type: StockMovementType.RELEASE,
+    quantityDelta: 0,
+    reservedDelta: -release,
+    reason: `Release ${release}`,
+    reference,
+    idempotencyKey,
   });
 }
 
 /** Fulfil a reservation: decrement on-hand and reserved together. */
 export async function commitReservationTx(
-  tx: ItemTx,
+  tx: InventoryTx,
   variantId: string,
   quantity: number,
   reference: string,
+  idempotencyKey?: string,
 ): Promise<void> {
-  if (quantity <= 0) throw new InventoryRuleError("Commit quantity must be positive.");
-  const item = await loadItemForUpdate(tx, { variantId });
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new InventoryRuleError("Commit quantity must be a positive integer.");
+  }
+  const item = await lockInventoryItem(tx, variantId);
+  if (idempotencyKey && (await movementExists(tx, idempotencyKey))) return;
+
   if (item.quantityReserved < quantity) {
     throw new InventoryRuleError(
-      `Cannot commit ${quantity}; only ${item.quantityReserved} reserved for ${item.variant.sku}.`,
+      `Cannot commit ${quantity}; only ${item.quantityReserved} reserved for ${item.sku}.`,
     );
   }
-  await tx.inventoryItem.update({
-    where: { id: item.id },
-    data: {
-      quantityOnHand: item.quantityOnHand - quantity,
-      quantityReserved: item.quantityReserved - quantity,
-    },
-  });
-  await tx.stockMovement.create({
-    data: {
-      inventoryItemId: item.id,
-      variantId,
-      type: StockMovementType.SALE,
-      quantityDelta: -quantity,
-      reason: `Sale of ${quantity}`,
-      reference,
-    },
+  await applyMovementTx(tx, item, {
+    type: StockMovementType.SALE,
+    quantityDelta: -quantity,
+    reservedDelta: -quantity,
+    reason: `Sale of ${quantity}`,
+    reference,
+    idempotencyKey,
   });
 }
 
@@ -385,46 +412,57 @@ export async function commitReservationTx(
  * Used by the importer. No-op (returns `false`) when already at the target.
  */
 export async function setOnHandTx(
-  tx: ItemTx,
+  tx: InventoryTx,
   variantId: string,
   targetOnHand: number,
-  movement: { type: StockMovementType; reason: string; reference: string; actorId: string | null },
+  movement: {
+    type: StockMovementType;
+    reason: string;
+    reference: string;
+    actorId: string | null;
+    idempotencyKey?: string;
+  },
 ): Promise<boolean> {
-  if (targetOnHand < 0) throw new InventoryRuleError("Target quantity must not be negative.");
-  const item = await loadItemForUpdate(tx, { variantId });
+  if (!Number.isInteger(targetOnHand) || targetOnHand < 0) {
+    throw new InventoryRuleError("Target quantity must be a non-negative integer.");
+  }
+  const item = await lockInventoryItem(tx, variantId);
+  if (movement.idempotencyKey && (await movementExists(tx, movement.idempotencyKey))) return false;
+
   const delta = targetOnHand - item.quantityOnHand;
   if (delta === 0) return false;
-  await applyOnHandDeltaTx(tx, item.id, item.quantityOnHand, item.quantityReserved, delta, {
+  await applyMovementTx(tx, item, {
     type: movement.type,
-    variantId: item.variant.id,
+    quantityDelta: delta,
+    reservedDelta: 0,
     reason: movement.reason,
     reference: movement.reference,
     actorId: movement.actorId,
+    idempotencyKey: movement.idempotencyKey,
   });
   return true;
 }
 
-/** Return stock to on-hand (e.g. an order refund). */
+/** Return stock to on-hand (e.g. an order refund / return). */
 export async function restockTx(
-  tx: ItemTx,
+  tx: InventoryTx,
   variantId: string,
   quantity: number,
   reference: string,
+  idempotencyKey?: string,
 ): Promise<void> {
-  if (quantity <= 0) throw new InventoryRuleError("Restock quantity must be positive.");
-  const item = await loadItemForUpdate(tx, { variantId });
-  await tx.inventoryItem.update({
-    where: { id: item.id },
-    data: { quantityOnHand: item.quantityOnHand + quantity },
-  });
-  await tx.stockMovement.create({
-    data: {
-      inventoryItemId: item.id,
-      variantId,
-      type: StockMovementType.RETURN,
-      quantityDelta: quantity,
-      reason: `Restock ${quantity}`,
-      reference,
-    },
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new InventoryRuleError("Restock quantity must be a positive integer.");
+  }
+  const item = await lockInventoryItem(tx, variantId);
+  if (idempotencyKey && (await movementExists(tx, idempotencyKey))) return;
+
+  await applyMovementTx(tx, item, {
+    type: StockMovementType.RETURN,
+    quantityDelta: quantity,
+    reservedDelta: 0,
+    reason: `Restock ${quantity}`,
+    reference,
+    idempotencyKey,
   });
 }

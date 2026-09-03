@@ -16,24 +16,30 @@ import { createMockPrisma, type MockPrisma } from "./helpers/mock-prisma";
 const manager = { id: "mgr_1", role: UserRole.MANAGER };
 const staff = { id: "stf_1", role: UserRole.STAFF };
 
+/**
+ * Stub the row-lock + counters for a single variant. `lockInventoryItem` issues
+ * a `SELECT ... FOR UPDATE` via `$queryRaw`; the guard logic under test operates
+ * on the row it returns.
+ */
 function stubItem(
   db: MockPrisma,
   overrides: Partial<{ onHand: number; reserved: number; reorderLevel: number | null }> = {},
 ) {
-  const item = {
+  const lockRow = {
     id: "inv_1",
+    variantId: "var_1",
+    sku: "SKU-1",
     quantityOnHand: overrides.onHand ?? 20,
     quantityReserved: overrides.reserved ?? 0,
     reorderLevel: overrides.reorderLevel ?? null,
-    variant: { id: "var_1", sku: "SKU-1" },
   };
   db.productVariant.findUnique.mockResolvedValue({ id: "var_1" } as never);
-  db.inventoryItem.findUnique.mockResolvedValue(item as never);
-  db.inventoryItem.findFirst.mockResolvedValue(item as never);
+  db.$queryRaw.mockResolvedValue([lockRow] as never);
   db.inventoryItem.update.mockResolvedValue({} as never);
   db.stockMovement.create.mockResolvedValue({ id: "mv_1" } as never);
+  db.stockMovement.findUnique.mockResolvedValue(null as never);
   db.auditLog.create.mockResolvedValue({ id: "a" } as never);
-  return item;
+  return lockRow;
 }
 
 describe("adjustInventory", () => {
@@ -60,9 +66,16 @@ describe("adjustInventory", () => {
       db,
     );
     expect(level.onHand).toBe(25);
+    expect(db.inventoryItem.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { quantityOnHand: 25, quantityReserved: 0 } }),
+    );
     expect(db.stockMovement.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ quantityDelta: 5, type: StockMovementType.PURCHASE }),
+        data: expect.objectContaining({
+          quantityDelta: 5,
+          reservedDelta: 0,
+          type: StockMovementType.PURCHASE,
+        }),
       }),
     );
     const audit = db.auditLog.create.mock.calls.at(-1)?.[0]?.data;
@@ -102,17 +115,30 @@ describe("order-flow primitives", () => {
     db = createMockPrisma();
   });
 
-  it("reserveStockTx checks availability", async () => {
+  it("reserveStockTx checks availability and increments reserved", async () => {
     stubItem(db, { onHand: 10, reserved: 6 });
     await reserveStockTx(db, "var_1", 4, "ORDER-1");
     expect(db.inventoryItem.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { quantityReserved: 10 } }),
+      expect.objectContaining({ data: { quantityOnHand: 10, quantityReserved: 10 } }),
     );
+    expect(db.stockMovement.create.mock.calls[0]![0].data).toMatchObject({
+      type: StockMovementType.RESERVATION,
+      quantityDelta: 0,
+      reservedDelta: 4,
+    });
 
     stubItem(db, { onHand: 10, reserved: 6 });
     await expect(reserveStockTx(db, "var_1", 5, "ORDER-2")).rejects.toBeInstanceOf(
       InventoryRuleError,
     );
+  });
+
+  it("reserveStockTx is a no-op when the idempotency key was already used", async () => {
+    stubItem(db, { onHand: 10, reserved: 0 });
+    db.stockMovement.findUnique.mockResolvedValue({ id: "mv_existing" } as never);
+    await reserveStockTx(db, "var_1", 3, "ORDER-1", "order:o1:reserve:var_1");
+    expect(db.inventoryItem.update).not.toHaveBeenCalled();
+    expect(db.stockMovement.create).not.toHaveBeenCalled();
   });
 
   it("commitReservationTx decrements on-hand and reserved together", async () => {
@@ -124,25 +150,46 @@ describe("order-flow primitives", () => {
     expect(db.stockMovement.create.mock.calls[0]![0].data).toMatchObject({
       type: StockMovementType.SALE,
       quantityDelta: -4,
+      reservedDelta: -4,
     });
+  });
+
+  it("commitReservationTx refuses to commit more than is reserved", async () => {
+    stubItem(db, { onHand: 10, reserved: 2 });
+    await expect(commitReservationTx(db, "var_1", 4, "ORDER-1")).rejects.toBeInstanceOf(
+      InventoryRuleError,
+    );
   });
 
   it("releaseReservationTx clamps to the reserved amount", async () => {
     stubItem(db, { onHand: 10, reserved: 3 });
     await releaseReservationTx(db, "var_1", 5, "ORDER-1");
     expect(db.inventoryItem.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { quantityReserved: 0 } }),
+      expect.objectContaining({ data: { quantityOnHand: 10, quantityReserved: 0 } }),
     );
+    expect(db.stockMovement.create.mock.calls[0]![0].data).toMatchObject({
+      type: StockMovementType.RELEASE,
+      reservedDelta: -3,
+    });
   });
 
   it("restockTx returns units to on-hand", async () => {
     stubItem(db, { onHand: 10 });
     await restockTx(db, "var_1", 2, "REFUND-1");
     expect(db.inventoryItem.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { quantityOnHand: 12 } }),
+      expect.objectContaining({ data: { quantityOnHand: 12, quantityReserved: 0 } }),
     );
     expect(db.stockMovement.create.mock.calls[0]![0].data).toMatchObject({
       type: StockMovementType.RETURN,
+      quantityDelta: 2,
+      reservedDelta: 0,
     });
+  });
+
+  it("rejects non-positive or non-integer quantities", async () => {
+    stubItem(db);
+    await expect(reserveStockTx(db, "var_1", 0, "O")).rejects.toBeInstanceOf(InventoryRuleError);
+    await expect(reserveStockTx(db, "var_1", -2, "O")).rejects.toBeInstanceOf(InventoryRuleError);
+    await expect(reserveStockTx(db, "var_1", 1.5, "O")).rejects.toBeInstanceOf(InventoryRuleError);
   });
 });

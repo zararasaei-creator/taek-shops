@@ -1,9 +1,9 @@
 # Taek Shops — Architecture
 
-> Status: **Phase 4 (catalogue, inventory, admin management, CSV import
-> foundation) implemented.** This document is the design of record. Where a
-> section describes something not yet built, it is marked _Planned_ or dated to a
-> later phase. Nothing here commits the project to legal, tax, or shipping rules
+> Status: **Phases 1–5 implemented** (foundation, database, auth/RBAC/audit,
+> catalogue + CSV import, inventory hardening). This document is the design of
+> record. Where a section describes something not yet built, it is marked
+> _Planned_ or dated to a later phase. Nothing here commits the project to legal, tax, or shipping rules
 > — those are operator data behind interfaces (see §11, §12).
 > Security specifics: [`docs/security.md`](security.md).
 > Catalogue / inventory / import specifics: [`docs/catalog.md`](catalog.md).
@@ -43,21 +43,24 @@ Browser │  Storefront (RSC)      Admin (RSC, auth-gated)      Route Handlers /
 
 ## 2. Major application modules
 
-| Module             | Location                       | Responsibility                                                       |
-| ------------------ | ------------------------------ | -------------------------------------------------------------------- |
-| Storefront         | `src/app/(storefront)/`        | Public catalogue, product pages, cart, checkout UI                   |
-| Administration     | `src/app/admin/`               | Auth-gated dashboard: products, variants, inventory, orders, imports |
-| Authentication     | `src/server/auth/`             | Credentials auth, DB sessions, RBAC guards, password/token handling  |
-| Audit              | `src/server/audit/`            | Generic append-only audit log + metadata sanitisation                |
-| User management    | `src/server/users/`            | Admin list / inspect / role / status operations (server-enforced)    |
-| Domain logic       | `src/server/domain/`           | Pricing, cart, inventory, orders, tax/shipping orchestration         |
-| Database access    | `src/server/db/`               | Prisma client + repositories; only module that touches the DB        |
-| Validation schemas | `src/lib/validation/`          | Shared Zod schemas + inferred types                                  |
-| Import processing  | `src/server/import/`           | CSV/XLSX parse → map → validate → preview → commit → audit           |
-| Config             | `src/server/config/`           | Validated environment configuration (`env.ts`)                       |
-| Shared UI          | `src/components/`              | Accessible, responsive component system                              |
-| Infrastructure     | `infra/`, `docker-compose.yml` | Local services, deployment assets                                    |
-| Tests              | `tests/unit/`, `tests/e2e/`    | Vitest unit/integration, Playwright end-to-end                       |
+| Module             | Location                                          | Responsibility                                                        |
+| ------------------ | ------------------------------------------------- | --------------------------------------------------------------------- |
+| Storefront         | `src/app/(storefront)/`                           | Public catalogue, product pages, cart, checkout UI                    |
+| Administration     | `src/app/admin/`                                  | Auth-gated dashboard: products, variants, inventory, orders, imports  |
+| Authentication     | `src/server/auth/`                                | Credentials auth, DB sessions, RBAC guards, password/token handling   |
+| Audit              | `src/server/audit/`                               | Generic append-only audit log + metadata sanitisation                 |
+| User management    | `src/server/users/`                               | Admin list / inspect / role / status operations (server-enforced)     |
+| Catalogue          | `src/server/catalog/`                             | Brand/category/product/variant/option/image services + public queries |
+| Inventory          | `src/server/inventory/`                           | Row-locked stock transactions, reconcilable ledger, invariant check   |
+| Orders             | `src/server/orders/`                              | Order-lifecycle → inventory wiring (reserve/commit/release/restock)   |
+| Domain logic       | `src/server/domain/`                              | Pricing, tax/shipping orchestration (money helper today)              |
+| Database access    | `src/server/db/`                                  | Prisma client + repositories; only module that touches the DB         |
+| Validation schemas | `src/lib/validation/`                             | Shared Zod schemas + inferred types                                   |
+| Import processing  | `src/server/import/`                              | CSV/XLSX parse → map → validate → preview → commit → audit            |
+| Config             | `src/server/config/`                              | Validated environment configuration (`env.ts`)                        |
+| Shared UI          | `src/components/`                                 | Accessible, responsive component system                               |
+| Infrastructure     | `infra/`, `docker-compose.yml`                    | Local services, deployment assets                                     |
+| Tests              | `tests/unit/`, `tests/integration/`, `tests/e2e/` | Vitest (mocked + live-DB), Playwright end-to-end                      |
 
 **Import boundaries (enforced by convention, later by lint rules):**
 
@@ -224,27 +227,31 @@ the buyable unit — it carries the **SKU**, price (cents), weight, and stock.
 
 ## 6. Inventory model
 
-> **Phase 4 status: adjustment domain implemented** (`src/server/inventory/`).
-> Detail in [`docs/catalog.md`](catalog.md) § "Inventory adjustment rules".
-> Every stock change goes through `adjustInventory` (or the transaction-composable
-> order-flow primitives) — there are no ad-hoc quantity writes.
+> **Phase 5 status: hardened** (`src/server/inventory/`, `src/server/orders/`).
+> Detail in [`docs/catalog.md`](catalog.md) § "Inventory adjustment rules" and
+> § "Concurrency & the ledger invariant". Every stock change goes through
+> `adjustInventory` or a transaction-composable primitive — no ad-hoc writes.
 
 - Each `ProductVariant` has exactly one `InventoryItem`
   (`@@unique` on `variantId`) with `quantityOnHand`, `quantityReserved`, optional
   `reorderLevel` / `reorderQuantity`. `available = onHand − reserved` is derived
-  in the domain layer, not stored.
+  in the domain layer, not stored. `CHECK` constraints keep both counters ≥ 0 and
+  `reserved ≤ onHand`.
 - **`StockMovement` is an append-only ledger.** Types: `INITIAL`, `PURCHASE`,
   `SALE`, `RETURN`, `ADJUSTMENT`, `RESERVATION`, `RELEASE`. Each row has a signed
-  `quantityDelta`, optional `reason` / `reference` (order number, import job id)
-  and optional `actorId`. The sum of deltas reconciles the `InventoryItem`
-  counters; from Phase 5 the counter and the movement are written in one
-  transaction.
-- All quantities are integers. There is no compelling reason for fractional
-  stock in this domain.
-- **Reservation / oversell protection** (behaviour, added in Phase 5–6): stock is
-  reserved when an order is created and committed on payment or released on
-  cancellation; the reserving update is conditional (`available >= qty`) inside
-  the order transaction.
+  `quantityDelta` (on-hand) **and** `reservedDelta` (reserved), optional `reason`
+  / `reference` / `actorId`, and an optional unique `idempotencyKey`. Both
+  counters reconcile against the ledger
+  (`onHand == SUM(quantityDelta)`, `reserved == SUM(reservedDelta)`); the counter
+  and the movement are written in one transaction, behind a `FOR UPDATE` row
+  lock.
+- All quantities are integers.
+- **Reservation / oversell protection.** Every mutation locks the `InventoryItem`
+  row (`SELECT … FOR UPDATE`) before checking availability, so parallel
+  reservations serialize and cannot oversell (verified: 50 parallel reservations
+  vs 20 units → exactly 20 succeed). `src/server/orders/order-inventory.ts` wires
+  reserve → commit → release → restock to the `OrderStatus` lifecycle; each
+  per-order operation is atomic across lines and idempotent under replay.
 
 ## 6a. Historical order snapshots
 

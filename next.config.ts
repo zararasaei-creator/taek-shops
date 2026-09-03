@@ -18,8 +18,11 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
-  // Produce a minimal, self-contained server bundle for Docker/production deploys.
-  output: "standalone",
+  // NOTE: `output: "standalone"` is intentionally NOT set here. It is only useful
+  // for the production Docker image (Phase 13), and when set it makes `next start`
+  // print a warning and behave inconsistently — which affected the e2e runner.
+  // Phase 13 re-introduces it together with the matching container start command
+  // (`node .next/standalone/server.js` + copied `.next/static` / `public`).
   reactStrictMode: true,
   // Fail the production build on type errors instead of silently shipping.
   typescript: { ignoreBuildErrors: false },

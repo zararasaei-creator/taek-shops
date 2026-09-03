@@ -48,6 +48,9 @@ export const AUDIT_ACTIONS = {
   IMPORT_PREVIEWED: "import.product.previewed",
   IMPORT_COMMITTED: "import.product.committed",
   IMPORT_CANCELLED: "import.product.cancelled",
+
+  // Orders (Phase 5 — inventory lifecycle wiring)
+  ORDER_STATUS_CHANGED: "order.status.changed",
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

@@ -429,18 +429,35 @@ model InventoryItem {
   variant   ProductVariant  @relation(fields: [variantId], references: [id], onDelete: Cascade)
   movements StockMovement[]
 
+  // Database-level backstop for the inventory rules the service enforces in
+  // application code. Added as raw SQL in migration 20260906000000_phase5_inventory
+  // (Prisma has no CHECK syntax); do not run `prisma migrate dev` against this
+  // schema without re-adding them — use `prisma migrate deploy`.
+  //   CHECK ("quantityOnHand"   >= 0)
+  //   CHECK ("quantityReserved" >= 0)
+  //   CHECK ("quantityReserved" <= "quantityOnHand")
   @@index([variantId])
 }
 
-// Append-only ledger. Sum of `quantityDelta` reconciles InventoryItem quantities.
+// Append-only ledger. The two running counters on InventoryItem are fully
+// reconstructable from this ledger (invariant, enforced by tests + the
+// `src/server/inventory/invariant.ts` reconciler):
+//   InventoryItem.quantityOnHand   == SUM(quantityDelta)
+//   InventoryItem.quantityReserved == SUM(reservedDelta)
 model StockMovement {
   id              String            @id @default(cuid())
   inventoryItemId String
   variantId       String
   type            StockMovementType
-  quantityDelta   Int // signed: +receipt / -consumption
+  quantityDelta   Int // signed change to quantityOnHand   (+receipt / -consumption; 0 for pure reservation moves)
+  reservedDelta   Int               @default(0) // signed change to quantityReserved (+reserve / -release-or-commit)
   reason          String?
   reference       String? // e.g. order number, import job id
+  // Deterministic key for operations that must apply exactly once (order
+  // lifecycle: `order:<id>:<op>:<variantId>`). NULL for manual admin
+  // adjustments. The partial unique index makes a replayed operation a no-op
+  // instead of a double movement. Introduced Phase 5.
+  idempotencyKey  String?           @unique
   actorId         String?
   createdAt       DateTime          @default(now())
 
