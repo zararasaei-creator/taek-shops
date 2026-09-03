@@ -98,25 +98,55 @@ Phase 3 (alongside the auth work), not retroactively in Phase 2.
 
 ---
 
-## Phase 3 — Authentication & authorization ⬜
+## Phase 3 — Authentication, authorization & audit 🚧 _(awaiting CTO review, 2026-09-03)_
 
-**Scope**
+**Scope (delivered)**
 
-- Auth.js (NextAuth v5) + Prisma adapter; email/password (Argon2id).
-- `middleware.ts` gate for `/admin/**` and `/account/**`.
-- `requireUser` / `requireStaff` / `requireAdmin` guards.
-- Sign-in / sign-out / register UI (React Hook Form + Zod).
-- `AuditLog` model + auth event logging.
-- First Playwright e2e: admin can sign in, guest is redirected.
+- Custom credentials auth + **database sessions** in `src/server/auth/`
+  (Auth.js-compatible shape; not the NextAuth library — rationale in
+  `docs/security.md` §1). Provider-extensible.
+- Argon2id password hashing (`@node-rs/argon2`); `passwordHash` structurally
+  isolated to two repo functions; centralised password policy.
+- RBAC: `CUSTOMER < STAFF < MANAGER < ADMIN` + layered `Permission` map;
+  `requireUser/Role/AnyRole/Permission` guards; `canAssignRole` escalation rule;
+  self-role / self-status change blocked.
+- Session cookie (`httpOnly`, `SameSite=Lax`, `Secure` in prod); logout,
+  password-reset, and deactivation all revoke sessions; disabled users rejected
+  at login and on every request.
+- Password-reset + email-verification foundations (token create/consume,
+  `Mailer` seam with `NoopMailer` — no delivery yet).
+- `RateLimiter` interface + in-process limiter on login / reset / verification.
+- Generic `AuditLog` model + `recordAudit` with metadata sanitisation; auth &
+  user-management events emitted.
+- Admin user-management services (list / inspect / role / status) + minimal
+  route handlers + a minimal `/login` page and server-gated `/admin`.
+- Security headers: nonce CSP via `src/proxy.ts` (Next 16 rename of middleware);
+  static headers via `next.config.ts`.
+- Schema: `+ MANAGER` role, `+ AuditLog`, `+ User.lastLoginAt` — migration
+  `20260904000000_phase3_auth`.
+- Optional dev admin seed (`SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`), idempotent,
+  password never logged.
 
 **Acceptance criteria**
 
-- [ ] Unauthenticated request to `/admin` redirects; authorised staff reaches it.
-- [ ] Role guard unit tests (allow/deny matrix) pass.
-- [ ] Passwords stored only as Argon2id hashes; verified by test.
-- [ ] Session revocation takes effect on next request (test).
-- [ ] e2e sign-in flow passes in CI.
-- [ ] Full verification pipeline green.
+- [x] Unauthenticated `/admin` redirects to `/login`; `/api/admin/*` returns 401
+      (e2e).
+- [x] Role/permission allow-deny matrix + escalation + self-change unit tests.
+- [x] Argon2id hashing, verification, policy, timing-safe unknown-user path
+      (unit tests).
+- [x] Session issue/validate/expire/disable/revoke (unit tests, mocked Prisma).
+- [x] Audit events created for security actions; secrets absent from metadata
+      (unit tests).
+- [x] Security headers present (e2e); CSP does not break the app.
+- [x] `prisma validate` / `generate` / migration determinism.
+- [x] `typecheck`, `lint`, `test` (all Phase 1–3), `build` green.
+- [ ] **Blocked (no Docker/Postgres in environment):** live `migrate deploy`,
+      real admin seed, and DB-backed e2e for the full sign-in → session →
+      logout loop. Carried to the Phase 4 pre-flight.
+
+**Deferred to Phase 4+:** real email transport; shared-store rate limiter;
+customer self-registration UI; account-settings UI; brute-force lockout counter;
+tightening `style-src` off `'unsafe-inline'`.
 
 ---
 

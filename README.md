@@ -4,15 +4,18 @@ A secure, maintainable, responsive, multilingual-ready **Canadian e-commerce
 platform** for taekwondo uniforms, belts, protective gear, training equipment,
 and accessories.
 
-> **Project status: Phase 2 (database foundation).** The application shell,
-> toolchain, design documents, and the full Prisma/PostgreSQL schema + initial
-> migration are in place. The storefront, admin dashboard, authentication,
-> payments, and the spreadsheet importer are planned work — see the roadmap.
+> **Project status: Phase 3 (authentication, authorization & audit).** The
+> application shell, toolchain, design docs, the Prisma/PostgreSQL schema, and
+> now a custom credentials-auth + RBAC + audit-log foundation are in place. The
+> storefront, catalogue/admin management, payments, and the spreadsheet importer
+> are planned work — see the roadmap.
 
 ## Documentation
 
 - [Architecture](docs/architecture.md) — system context, modules, boundaries,
   security, testing, deployment, key decisions.
+- [Security notes](docs/security.md) — auth, sessions, RBAC, audit, headers,
+  deferrals.
 - [Implementation roadmap](docs/implementation-roadmap.md) — phased plan with
   acceptance criteria.
 - [Product import specification](docs/product-import-specification.md) —
@@ -21,8 +24,8 @@ and accessories.
 ## Tech stack
 
 Next.js 16 (App Router) · TypeScript (strict) · React 19 · Tailwind CSS v4 ·
-Zod · PostgreSQL + Prisma 6.19 · Vitest + Testing Library · Playwright · ESLint ·
-Prettier · Auth.js _(from Phase 3)_ ·
+Zod · PostgreSQL + Prisma 6.19 · custom credentials auth + DB sessions
+(`@node-rs/argon2`) · Vitest + Testing Library · Playwright · ESLint · Prettier ·
 Stripe / S3-compatible storage _(later phases, behind interfaces)_.
 
 ## Prerequisites
@@ -51,8 +54,12 @@ cp .env.example .env   # then edit .env
   `.env` and fill in real values. **Never commit `.env`.**
 - Browser-exposed values must be prefixed `NEXT_PUBLIC_`. Everything else is
   server-only and never bundled for the client.
-- From Phase 2, `DATABASE_URL` is required; other integrations (auth, Stripe,
-  storage) remain optional until their phase.
+- From Phase 2, `DATABASE_URL` is required. `AUTH_SECRET` (a ≥16-char pepper) is
+  optional but strongly recommended for Phase 3+. Stripe/storage vars remain
+  optional until their phase.
+- **Development admin:** set `SEED_ADMIN_EMAIL` + `SEED_ADMIN_PASSWORD` in `.env`,
+  then `npm run db:seed` creates one `ADMIN` user (password hashed, never
+  printed). Dev/demo only — never set these in production.
 
 ## Database (local)
 
@@ -135,11 +142,14 @@ src/
   lib/
     utils/               Small framework-agnostic helpers
     validation/          Shared Zod schemas (Phase 4+)
+  proxy.ts               Edge proxy: security headers (CSP) + optimistic /admin gate
   server/
     config/env.ts        Validated environment configuration
-    auth/                Auth.js integration (Phase 3)
+    auth/                Credentials auth, DB sessions, RBAC, password/token handling
+    audit/               Generic append-only audit log + sanitisation
+    users/               Admin user-management services (server-enforced)
     domain/money.ts      Integer-cents money helper
-    db/client.ts         Prisma client singleton
+    db/                  Prisma client singleton + repositories
     import/              Spreadsheet import pipeline (Phase 10)
 prisma/
   schema.prisma          Database schema of record (29 models, 19 enums)

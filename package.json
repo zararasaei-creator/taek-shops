@@ -32,6 +32,7 @@
     "db:reset": "prisma migrate reset"
   },
   "dependencies": {
+    "@node-rs/argon2": "^2.2.0",
     "@prisma/client": "^6.19.3",
     "next": "16.3.4",
     "react": "19.2.8",
@@ -57,6 +58,7 @@
     "prisma": "^6.19.3",
     "tailwindcss": "^4",
     "typescript": "^5",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "vitest-mock-extended": "^5.1.1"
   }
 }

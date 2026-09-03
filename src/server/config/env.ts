@@ -25,9 +25,15 @@ const serverSchema = z.object({
   // Optional shadow database for `prisma migrate dev` on hosts that need one.
   SHADOW_DATABASE_URL: z.url().optional(),
 
-  // Authentication (Auth.js).
+  // Authentication.
+  // Optional server-side "pepper": when set, session/verification token hashes
+  // are HMAC-ed with it so a database leak alone does not expose usable tokens.
   AUTH_SECRET: z.string().min(16).optional(),
   AUTH_URL: z.url().optional(),
+  // Argon2id cost parameters (OWASP defaults). Raise on stronger hardware.
+  AUTH_ARGON_MEMORY_KIB: z.coerce.number().int().min(8192).default(19456),
+  AUTH_ARGON_TIME_COST: z.coerce.number().int().min(2).default(2),
+  AUTH_ARGON_PARALLELISM: z.coerce.number().int().min(1).default(1),
 
   // Payment provider (Stripe) - kept behind a replaceable interface.
   STRIPE_SECRET_KEY: z.string().min(1).optional(),

@@ -1,10 +1,10 @@
 # Taek Shops — Architecture
 
-> Status: **Phase 2 (database foundation) implemented.** This document is the
-> design of record. Where a section describes something not yet built, it is
-> marked _Planned_ or dated to a later phase. Nothing here commits the project to
-> legal, tax, or shipping rules — those are operator data behind interfaces
-> (see §11, §12).
+> Status: **Phase 3 (authentication, authorization, audit) implemented.** This
+> document is the design of record. Where a section describes something not yet
+> built, it is marked _Planned_ or dated to a later phase. Nothing here commits
+> the project to legal, tax, or shipping rules — those are operator data behind
+> interfaces (see §11, §12). Security specifics: [`docs/security.md`](security.md).
 
 ## 1. System context
 
@@ -45,7 +45,9 @@ Browser │  Storefront (RSC)      Admin (RSC, auth-gated)      Route Handlers /
 | ------------------ | ------------------------------ | -------------------------------------------------------------------- |
 | Storefront         | `src/app/(storefront)/`        | Public catalogue, product pages, cart, checkout UI                   |
 | Administration     | `src/app/admin/`               | Auth-gated dashboard: products, variants, inventory, orders, imports |
-| Authentication     | `src/server/auth/`             | Auth.js config, session, role guards                                 |
+| Authentication     | `src/server/auth/`             | Credentials auth, DB sessions, RBAC guards, password/token handling  |
+| Audit              | `src/server/audit/`            | Generic append-only audit log + metadata sanitisation                |
+| User management    | `src/server/users/`            | Admin list / inspect / role / status operations (server-enforced)    |
 | Domain logic       | `src/server/domain/`           | Pricing, cart, inventory, orders, tax/shipping orchestration         |
 | Database access    | `src/server/db/`               | Prisma client + repositories; only module that touches the DB        |
 | Validation schemas | `src/lib/validation/`          | Shared Zod schemas + inferred types                                  |
@@ -62,27 +64,39 @@ Browser │  Storefront (RSC)      Admin (RSC, auth-gated)      Route Handlers /
 - Only `src/server/db/**` imports the Prisma client.
 - `src/server/config/env.ts` is the only reader of `process.env`.
 
-## 3. Authentication & authorization model _(Planned)_
+## 3. Authentication & authorization model
 
-- **Library:** Auth.js (NextAuth v5) with the Prisma adapter.
-- **Session strategy:** database sessions (needed for immediate revocation of
-  staff access).
-- **Credential model:** email + password for customers (Argon2id hashing) and
-  staff. OAuth providers can be added later without schema change.
-- **Roles:** `customer`, `staff`, `admin` stored on the `User` record.
-  - `customer` — own account and orders only.
-  - `staff` — read/write catalogue, inventory, orders; run imports.
-  - `admin` — everything staff can do, plus user management and destructive
-    operations.
+> **Phase 3 status: implemented.** Full detail and rationale in
+> [`docs/security.md`](security.md). Summary below.
+
+- **Approach:** a custom credentials + **database-session** implementation in
+  `src/server/auth/`, Auth.js-compatible in shape but not the NextAuth library
+  (NextAuth's Credentials provider cannot use DB sessions, which every Phase 3
+  security requirement needs — see `security.md` §1). OAuth providers slot in
+  beside `authenticateWithCredentials` later.
+- **Sessions:** opaque 32-byte token in an `httpOnly` `SameSite=Lax` cookie;
+  only its hash is stored (`Session.tokenHash`); 30-day absolute expiry;
+  validated against the DB every request (expiry + `status === ACTIVE`); role
+  read fresh from the joined user row. Logout, password reset, and deactivation
+  all delete session rows.
+- **Passwords:** Argon2id (`@node-rs/argon2`, OWASP params). `passwordHash` is
+  read by two repo functions only and omitted from every other select. Policy
+  (length + blocklist + personal-info, no composition rules) in one module.
+- **Roles:** `CUSTOMER < STAFF < MANAGER < ADMIN` (`UserRole` enum), hierarchical
+  `ROLE_RANK` + a layered `Permission` map.
 - **Enforcement points:**
-  1. `middleware.ts` — coarse gate: redirect unauthenticated users away from
-     `/admin/**` and `/account/**`.
-  2. Server-side guards (`requireUser`, `requireStaff`, `requireAdmin`) in every
-     admin route handler, server action, and admin page — the authoritative check.
-  3. Domain services never trust the caller; sensitive mutations take an explicit
-     actor argument used for audit logging.
-- **CSRF:** server actions use the framework's built-in origin checks; custom
-  route handlers that mutate require same-origin + auth.
+  1. `src/proxy.ts` — optimistic cookie-presence redirect for `/admin` (UX only,
+     Edge, no DB).
+  2. Server-side guards (`requireUser` / `requireRole` / `requireAnyRole` /
+     `requirePermission`) called inside every service function and route handler
+     — the authoritative check.
+  3. Privilege-escalation rule (`canAssignRole`) + self-role/self-status change
+     blocks in `src/server/users/user-management.ts`.
+- **CSRF:** Server Actions use Next's built-in Origin/Host check; hand-written
+  mutating route handlers use `guardMutation()` (same-origin + double-submit
+  `taek_csrf` token).
+- **Audit:** every auth/security event goes through `recordAudit`
+  (`src/server/audit/`), which sanitises metadata and never stores secrets.
 
 ## 4. Database architecture
 
@@ -130,6 +144,7 @@ Browser │  Storefront (RSC)      Admin (RSC, auth-gated)      Route Handlers /
 | Orders    | `Order`, `OrderItem`, `OrderAddress`, `OrderDiscount`, `Payment`                                                                     |
 | Config    | `TaxRegion`, `TaxRate`, `ShippingZone`, `ShippingZoneRegion`, `ShippingMethod`, `Discount`                                           |
 | Import    | `ImportJob`, `ImportJobRow`                                                                                                          |
+| Audit     | `AuditLog` (generic, append-only; Phase 3)                                                                                           |
 
 ### Entity-relationship diagram (core entities)
 
@@ -171,6 +186,7 @@ erDiagram
   ShippingZone ||--o{ ShippingMethod : "offers"
 
   ImportJob ||--o{ ImportJobRow : "row results"
+  User ||--o{ AuditLog : "recorded action"
 ```
 
 ## 5. Product & variant model
@@ -374,25 +390,25 @@ Migrations are written expand/contract so one release stays backward-compatible.
 
 ## 13. Security controls
 
-| Area              | Control                                                                                                                                                     |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Configuration     | All env vars validated at startup (`src/server/config/env.ts`); fail fast; no secret defaults                                                               |
-| Secrets           | Server-only; never imported into client bundles; `.env` git-ignored; `.env.example` names only                                                              |
-| AuthN             | Auth.js, Argon2id password hashing, database sessions, revocable staff access                                                                               |
-| AuthZ             | Middleware gate + mandatory server-side role guards on every admin/account operation                                                                        |
-| Transport         | HTTPS enforced at the edge; HSTS; secure, `HttpOnly`, `SameSite` cookies                                                                                    |
-| Input validation  | Zod at every trust boundary (forms, route handlers, server actions, import rows)                                                                            |
-| Output / XSS      | React escaping by default; no `dangerouslySetInnerHTML` without sanitisation                                                                                |
-| SQL injection     | Prisma parameterised queries only; no raw string SQL                                                                                                        |
-| CSRF              | Server-action origin checks; same-origin + auth on mutating route handlers                                                                                  |
-| File upload       | Extension + MIME allow-list, size/row caps, streamed parsing, stored out of web root                                                                        |
-| Formula injection | Import cells starting with `= + - @` neutralised; formulas never evaluated                                                                                  |
-| Payment data      | Never stored; PCI scope minimised via Stripe-hosted elements                                                                                                |
-| Rate limiting     | Auth endpoints, import upload, webhook — token-bucket per IP / per user                                                                                     |
-| Headers           | CSP, `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options` via `next.config`/middleware                                                            |
-| Auditing          | `ImportJob` / `ImportJobRow` track imports (Phase 2). A generic `AuditLog` for admin mutations, order state changes, and auth events is planned for Phase 3 |
-| Dependencies      | Lockfile committed; `npm audit` in CI; Dependabot/Renovate later                                                                                            |
-| PII               | Minimal collection; no real customer/business data in fixtures or seeds                                                                                     |
+| Area              | Control                                                                                                                                                                                                                             |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Configuration     | All env vars validated at startup (`src/server/config/env.ts`); fail fast; no secret defaults                                                                                                                                       |
+| Secrets           | Server-only; never imported into client bundles; `.env` git-ignored; `.env.example` names only                                                                                                                                      |
+| AuthN             | Custom credentials + DB sessions (`src/server/auth`); Argon2id hashing; opaque hashed session tokens; disabled users blocked at login and on every request                                                                          |
+| AuthZ             | Optimistic proxy gate + **mandatory** server-side guards (`requireRole` / `requirePermission`) inside every service; privilege-escalation + self-change blocks; role/status read from DB per request                                |
+| Transport         | HTTPS enforced at the edge; HSTS (prod); `httpOnly` + `Secure` (prod) + `SameSite=Lax` session cookie                                                                                                                               |
+| Input validation  | Zod at every trust boundary (forms, route handlers, server actions, import rows)                                                                                                                                                    |
+| Output / XSS      | React escaping by default; no `dangerouslySetInnerHTML` without sanitisation                                                                                                                                                        |
+| SQL injection     | Prisma parameterised queries only; no raw string SQL                                                                                                                                                                                |
+| CSRF              | Server-action Origin/Host check (Next built-in); `guardMutation()` = same-origin + double-submit `taek_csrf` token on hand-written mutating routes                                                                                  |
+| File upload       | Extension + MIME allow-list, size/row caps, streamed parsing, stored out of web root                                                                                                                                                |
+| Formula injection | Import cells starting with `= + - @` neutralised; formulas never evaluated                                                                                                                                                          |
+| Payment data      | Never stored; PCI scope minimised via Stripe-hosted elements                                                                                                                                                                        |
+| Rate limiting     | `RateLimiter` interface + in-process limiter on login / password-reset / verification (per email + per IP). Shared-store impl deferred to production — `security.md` §8                                                             |
+| Headers           | CSP (per-request nonce, `strict-dynamic`, `frame-ancestors 'none'`) via `src/proxy.ts`; `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`, COOP via `next.config`. Deferrals in `security.md` §9 |
+| Auditing          | Generic append-only `AuditLog` + `recordAudit` with metadata sanitisation (Phase 3); `ImportJob` / `ImportJobRow` for imports (Phase 2). Secrets never logged or audited                                                            |
+| Dependencies      | Lockfile committed; `npm audit` in CI; Dependabot/Renovate later                                                                                                                                                                    |
+| PII               | Minimal collection; no real customer/business data in fixtures or seeds                                                                                                                                                             |
 
 ## 14. Testing strategy
 
@@ -436,20 +452,22 @@ Migrations are written expand/contract so one release stays backward-compatible.
 
 ## 16. Key technical decisions & trade-offs
 
-| Decision                                                                                                                      | Rationale                                                                                                                                                                                                              | Trade-off / revisit trigger                                                                       |
-| ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Single Next.js app (modular monolith), no services                                                                            | Small team, one product; simplest thing that meets every requirement                                                                                                                                                   | If admin/import load competes with storefront, extract a worker/service                           |
-| App Router + React Server Components                                                                                          | Less client JS, straightforward data loading, first-class in Next 16                                                                                                                                                   | Async Server Components can't be unit-tested — covered by e2e instead                             |
-| PostgreSQL + Prisma, pinned to **6.19.x** (not 7.x/8.x-rc)                                                                    | Relational data (orders, inventory ledger) wants transactions & FKs; 6.x has the mature, documented `migrate`/`generate` workflow. npm's `latest` tag currently points at an 8.0 release candidate and 7.x is very new | Upgrade to 7.x once it settles; that upgrade also moves seed config fully into `prisma.config.ts` |
-| Prisma client only in `src/server/db`                                                                                         | Keeps queries reviewable; enables later caching/replicas                                                                                                                                                               | Slight indirection cost                                                                           |
-| Money as integer cents; `Currency` enum defaulting CAD                                                                        | Avoids float errors; matches Stripe's smallest-unit model                                                                                                                                                              | Multi-currency needs FX policy + per-currency pricing later                                       |
-| Rates (tax/discount) as `Decimal`, results as cents                                                                           | Exact fractions without float drift; money stays integer                                                                                                                                                               | `Decimal` needs the domain layer to convert deliberately                                          |
-| Normalised product options (`ProductOption` → `Value` → variant join)                                                         | Arbitrary Size × Colour × … combinations; not uniform-specific; clean import validation                                                                                                                                | A variant's option set is several rows, not columns — repository layer hides this                 |
-| `""` sentinel (not `NULL`) for "applies to all" in `TaxRate.taxCategory`, `TaxRegion.province`, `ShippingZoneRegion.province` | Lets these participate in composite `@@unique` keys and be targeted by `upsert` (Postgres treats `NULL` as distinct)                                                                                                   | Slightly less obvious than `NULL`; documented in the schema                                       |
-| Order data is snapshotted (`OrderItem`, `OrderAddress`, `OrderDiscount`)                                                      | History stays correct after catalogue/address edits; FKs are `SetNull`                                                                                                                                                 | Some duplication between live and snapshot fields                                                 |
-| `exceljs` + `csv-parse` for import (not SheetJS)                                                                              | Streaming, actively maintained, smaller supply-chain risk                                                                                                                                                              | Fewer exotic format features                                                                      |
-| Everything behind provider interfaces (pay/tax/ship)                                                                          | Requirement; avoids vendor lock-in; testable with fakes                                                                                                                                                                | A little upfront abstraction before the second implementation exists                              |
-| Auth.js database sessions                                                                                                     | Immediate staff revocation, adapter matches Prisma                                                                                                                                                                     | Extra DB read per request vs. JWT — acceptable at this scale                                      |
-| Tailwind CSS v4                                                                                                               | Fast styling, ships with the scaffold, good for a design-token system                                                                                                                                                  | Utility-heavy markup; mitigated by the shared component layer                                     |
-| npm (not pnpm/yarn)                                                                                                           | Available in the environment; lockfile committed                                                                                                                                                                       | Switch is low-cost if the team prefers pnpm                                                       |
-| No i18n library yet, but "multilingual-ready"                                                                                 | Avoid premature complexity; keep copy in components extractable                                                                                                                                                        | Introduce `next-intl` when a second locale (fr-CA) is scheduled                                   |
+| Decision                                                                                                                      | Rationale                                                                                                                                                                                                               | Trade-off / revisit trigger                                                                        |
+| ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Single Next.js app (modular monolith), no services                                                                            | Small team, one product; simplest thing that meets every requirement                                                                                                                                                    | If admin/import load competes with storefront, extract a worker/service                            |
+| App Router + React Server Components                                                                                          | Less client JS, straightforward data loading, first-class in Next 16                                                                                                                                                    | Async Server Components can't be unit-tested — covered by e2e instead                              |
+| PostgreSQL + Prisma, pinned to **6.19.x** (not 7.x/8.x-rc)                                                                    | Relational data (orders, inventory ledger) wants transactions & FKs; 6.x has the mature, documented `migrate`/`generate` workflow. npm's `latest` tag currently points at an 8.0 release candidate and 7.x is very new  | Upgrade to 7.x once it settles; that upgrade also moves seed config fully into `prisma.config.ts`  |
+| Prisma client only in `src/server/db`                                                                                         | Keeps queries reviewable; enables later caching/replicas                                                                                                                                                                | Slight indirection cost                                                                            |
+| Money as integer cents; `Currency` enum defaulting CAD                                                                        | Avoids float errors; matches Stripe's smallest-unit model                                                                                                                                                               | Multi-currency needs FX policy + per-currency pricing later                                        |
+| Rates (tax/discount) as `Decimal`, results as cents                                                                           | Exact fractions without float drift; money stays integer                                                                                                                                                                | `Decimal` needs the domain layer to convert deliberately                                           |
+| Normalised product options (`ProductOption` → `Value` → variant join)                                                         | Arbitrary Size × Colour × … combinations; not uniform-specific; clean import validation                                                                                                                                 | A variant's option set is several rows, not columns — repository layer hides this                  |
+| `""` sentinel (not `NULL`) for "applies to all" in `TaxRate.taxCategory`, `TaxRegion.province`, `ShippingZoneRegion.province` | Lets these participate in composite `@@unique` keys and be targeted by `upsert` (Postgres treats `NULL` as distinct)                                                                                                    | Slightly less obvious than `NULL`; documented in the schema                                        |
+| Order data is snapshotted (`OrderItem`, `OrderAddress`, `OrderDiscount`)                                                      | History stays correct after catalogue/address edits; FKs are `SetNull`                                                                                                                                                  | Some duplication between live and snapshot fields                                                  |
+| `exceljs` + `csv-parse` for import (not SheetJS)                                                                              | Streaming, actively maintained, smaller supply-chain risk                                                                                                                                                               | Fewer exotic format features                                                                       |
+| Everything behind provider interfaces (pay/tax/ship)                                                                          | Requirement; avoids vendor lock-in; testable with fakes                                                                                                                                                                 | A little upfront abstraction before the second implementation exists                               |
+| Custom credentials auth + DB sessions (not the NextAuth library)                                                              | NextAuth's Credentials provider forces JWT, which defeats instant revocation / disabled-user lockout / DB-sourced roles — all Phase 3 requirements. Uses the Phase 2 `Session` schema as approved. Provider-extensible. | We maintain the session/cookie/CSRF code ourselves (~small, well-tested). Ratify in Phase 3 review |
+| Argon2id via `@node-rs/argon2` (not `argon2`/`bcrypt`)                                                                        | Prebuilt binaries for win/linux-gnu/linux-musl/mac (no node-gyp); argon2id is the current OWASP recommendation                                                                                                          | Native dependency; pinned and in `serverExternalPackages`                                          |
+| In-process rate limiter behind a `RateLimiter` interface                                                                      | No paid infra in Phase 3; correct for single-instance and tests                                                                                                                                                         | Not correct across instances — must swap for a shared store before horizontal scaling              |
+| Tailwind CSS v4                                                                                                               | Fast styling, ships with the scaffold, good for a design-token system                                                                                                                                                   | Utility-heavy markup; mitigated by the shared component layer                                      |
+| npm (not pnpm/yarn)                                                                                                           | Available in the environment; lockfile committed                                                                                                                                                                        | Switch is low-cost if the team prefers pnpm                                                        |
+| No i18n library yet, but "multilingual-ready"                                                                                 | Avoid premature complexity; keep copy in components extractable                                                                                                                                                         | Introduce `next-intl` when a second locale (fr-CA) is scheduled                                    |

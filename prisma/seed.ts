@@ -5,14 +5,28 @@
  * four variants (each with an inventory record + opening stock movement), an
  * example Ontario tax region/rate, and an example shipping zone/method.
  *
- * Contains NO real or fake customers and NO secrets. Idempotent: every write is
- * an upsert keyed on a unique column, so it is safe to run repeatedly.
+ * Optionally seeds ONE administrator account, but only when both
+ * SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD are present in the environment. The
+ * password is read from the environment, hashed with Argon2id, and never logged.
+ *
+ * Contains NO real or fake customers and NO secrets in source. Idempotent: every
+ * write is an upsert keyed on a unique column, so it is safe to run repeatedly.
  *
  * Run with:  npx prisma db seed
  */
+import { hash as argon2Hash } from "@node-rs/argon2";
 import { PrismaClient, StockMovementType } from "@prisma/client";
 
 const prisma = new PrismaClient();
+
+// Mirrors src/server/auth/config.ts ARGON2_OPTIONS (OWASP defaults). Seed cannot
+// import the `@/` alias, so the values are repeated here intentionally.
+// `@node-rs/argon2` defaults the algorithm to Argon2id.
+const SEED_ARGON = {
+  memoryCost: 19456,
+  timeCost: 2,
+  parallelism: 1,
+} as const;
 
 async function seedCategories() {
   const roots = [
@@ -216,22 +230,77 @@ async function seedDemoProduct(categoryIds: Map<string, string>) {
   return product.id;
 }
 
+/**
+ * Optional single administrator. Development/demo mechanism only:
+ * - runs solely when SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD are both set;
+ * - the password never appears in source or logs;
+ * - idempotent: re-running keeps role/status ACTIVE/ADMIN and does NOT rotate
+ *   the password unless SEED_ADMIN_FORCE_PASSWORD=true.
+ */
+async function seedAdminUser(): Promise<void> {
+  const email = process.env.SEED_ADMIN_EMAIL?.trim().toLowerCase();
+  const password = process.env.SEED_ADMIN_PASSWORD;
+
+  if (!email || !password) {
+    console.info("[seed] SEED_ADMIN_EMAIL / SEED_ADMIN_PASSWORD not set — skipping admin user.");
+    return;
+  }
+  if (password.length < 10) {
+    console.warn("[seed] SEED_ADMIN_PASSWORD is below the 10-character policy minimum — skipping.");
+    return;
+  }
+
+  const existing = await prisma.user.findUnique({
+    where: { email },
+    select: { id: true, passwordHash: true },
+  });
+  const force = process.env.SEED_ADMIN_FORCE_PASSWORD === "true";
+  const shouldSetPassword = !existing || !existing.passwordHash || force;
+  const passwordHash = shouldSetPassword ? await argon2Hash(password, SEED_ARGON) : undefined;
+
+  await prisma.user.upsert({
+    where: { email },
+    update: {
+      role: "ADMIN",
+      status: "ACTIVE",
+      ...(passwordHash ? { passwordHash } : {}),
+    },
+    create: {
+      email,
+      role: "ADMIN",
+      status: "ACTIVE",
+      firstName: "Seed",
+      lastName: "Admin",
+      emailVerifiedAt: new Date(),
+      passwordHash: passwordHash ?? (await argon2Hash(password, SEED_ARGON)),
+    },
+  });
+
+  console.info(
+    "[seed] admin user ensured: %s (role=ADMIN, password %s)",
+    email,
+    shouldSetPassword ? "set from env" : "left unchanged",
+  );
+}
+
 async function main() {
   const categoryIds = await seedCategories();
   await seedTax();
   await seedShipping();
   const productId = await seedDemoProduct(categoryIds);
+  await seedAdminUser();
 
-  const [categories, products, variants, inventory] = await Promise.all([
+  const [categories, products, variants, inventory, users] = await Promise.all([
     prisma.category.count(),
     prisma.product.count(),
     prisma.productVariant.count(),
     prisma.inventoryItem.count(),
+    prisma.user.count(),
   ]);
 
   console.log(
     `Seed complete: ${categories} categories, ${products} product(s) ` +
-      `(demo=${productId}), ${variants} variants, ${inventory} inventory items.`,
+      `(demo=${productId}), ${variants} variants, ${inventory} inventory items, ${users} user(s).`,
   );
 }
 

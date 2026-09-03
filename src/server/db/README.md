@@ -9,6 +9,10 @@ imports a database client directly, and there is never more than one
 - **`client.ts`** — the shared `prisma` client. Cached on `globalThis` in
   development so Next.js hot-reload does not open a new connection pool on every
   edit. In production a single module instance is used.
+- **`users-repo.ts`** — user queries. `safeUserSelect` omits `passwordHash`;
+  `findCredentialsByEmail` / `findCredentialsById` are the ONLY functions that
+  read it, for the authenticator and self-service password change.
+- **`sessions-repo.ts`** — session create / lookup-by-hash / revoke helpers.
 
 ## Related (outside this folder)
 
