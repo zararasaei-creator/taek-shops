@@ -1,13 +1,31 @@
 # Database access (`src/server/db`)
 
 All PostgreSQL access goes through this module. Nothing outside `src/server`
-imports a database client directly.
+imports a database client directly, and there is never more than one
+`PrismaClient` in a process.
 
-**Planned contents (Phase 2+):**
+## Contents
 
-- `client.ts` — singleton Prisma client (guarded against hot-reload duplication).
-- `../../../prisma/schema.prisma` — schema of record.
-- Repository / query helpers grouped by aggregate (products, inventory, orders).
+- **`client.ts`** — the shared `prisma` client. Cached on `globalThis` in
+  development so Next.js hot-reload does not open a new connection pool on every
+  edit. In production a single module instance is used.
 
-Not implemented in Phase 1. See `docs/architecture.md` and
-`docs/implementation-roadmap.md`.
+## Related (outside this folder)
+
+- **`prisma/schema.prisma`** — schema of record (29 models, 19 enums).
+- **`prisma/migrations/`** — migration history. `20260903000000_init` is the
+  baseline.
+- **`prisma/seed.ts`** — synthetic development seed (`npm run db:seed`).
+- **`prisma.config.ts`** — Prisma CLI configuration (loads `.env`).
+- **`src/server/domain/money.ts`** — the only place money (integer cents) is
+  parsed / formatted / calculated.
+
+## Planned (Phase 4+)
+
+Repository / query helpers grouped by aggregate (`categories.ts`, `brands.ts`,
+`products.ts`, `variants.ts`, `inventory.ts`, `orders.ts`), each exposing typed
+functions instead of raw client calls.
+
+## Commands
+
+See `docs/architecture.md` § "Migration workflow" and the root `README.md`.

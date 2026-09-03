@@ -1,9 +1,10 @@
 # Taek Shops — Architecture
 
-> Status: **Phase 1 (foundation)**. This document is the design of record. Where a
-> section describes something not yet built, it is marked _Planned_. Nothing here
-> commits the project to legal, tax, or shipping rules — those are provider
-> concerns behind interfaces (see §11, §12).
+> Status: **Phase 2 (database foundation) implemented.** This document is the
+> design of record. Where a section describes something not yet built, it is
+> marked _Planned_ or dated to a later phase. Nothing here commits the project to
+> legal, tax, or shipping rules — those are operator data behind interfaces
+> (see §11, §12).
 
 ## 1. System context
 
@@ -83,72 +84,155 @@ Browser │  Storefront (RSC)      Admin (RSC, auth-gated)      Route Handlers /
 - **CSRF:** server actions use the framework's built-in origin checks; custom
   route handlers that mutate require same-origin + auth.
 
-## 4. Database boundaries
+## 4. Database architecture
 
-- **One PostgreSQL database**, one Prisma schema. No microservices, no per-module
-  databases at this stage.
-- **Logical schema groups** (same DB, namespaced by model prefix / Prisma
-  `@@map`):
-  - _Identity_: `User`, `Account`, `Session`, `VerificationToken`.
-  - _Catalogue_: `Category`, `Brand`, `Product`, `ProductVariant`,
-    `VariantAttribute`, `ProductImage`.
-  - _Inventory_: `InventoryItem`, `StockMovement`.
-  - _Commerce_: `Cart`, `CartItem`, `Order`, `OrderItem`, `Address`, `Payment`,
-    `Shipment`.
-  - _Operations_: `ImportBatch`, `ImportRow`, `AuditLog`.
-- **Access rule:** application code calls repository functions in
-  `src/server/db/`, not the Prisma client directly. This keeps query patterns
-  reviewable and makes it possible to add caching or read replicas later.
-- **Migrations:** Prisma Migrate; every schema change ships as a checked-in
-  migration. `DIRECT_DATABASE_URL` supports running migrations against a
-  non-pooled connection.
-- **Money:** stored as integer **cents** (`Int`) in CAD, never floats. A
-  `Money` value object in the domain layer wraps arithmetic and formatting.
+> **Phase 2 status: implemented.** `prisma/schema.prisma` (29 models, 19 enums)
+> and the initial migration `prisma/migrations/20260903000000_init/` exist. No
+> application logic reads or writes the database yet.
+
+- **One PostgreSQL database**, one Prisma schema, one migration history. No
+  microservices, no per-module databases.
+- **Prisma ORM** (`prisma` CLI 6.19.x, `@prisma/client`). Configuration in
+  `prisma.config.ts`; connection string from `DATABASE_URL` (required).
+- **Access rule:** application code goes through the shared client in
+  [`src/server/db/client.ts`](../src/server/db/client.ts) and (from Phase 4)
+  repository helpers beside it — never a second `PrismaClient`. The singleton is
+  cached on `globalThis` in dev to survive HMR without leaking connections.
+- **IDs:** every model uses `String @id @default(cuid())`; pure join tables use a
+  composite `@@id`.
+- **Money:** every monetary column is an **integer number of cents** (`Int`),
+  currency-scoped by a `Currency` enum defaulting to `CAD`. Never `Float` /
+  `Decimal`. `Decimal(9,6)` / `Decimal(5,4)` are used **only** for tax and
+  discount _rates_ (exact fractions, e.g. `0.130000`); the domain layer converts
+  a rate applied to a cents base back to integer cents.
+  [`src/server/domain/money.ts`](../src/server/domain/money.ts) is the only place
+  money is parsed, added, multiplied, or formatted.
+- **Timestamps:** `createdAt` + `updatedAt` on mutable rows; append-only rows
+  (`StockMovement`, `OrderAddress`, `OrderDiscount`, `VerificationToken`,
+  `ImportJobRow`, `Session`) keep only `createdAt`.
+- **History preservation:** status enums and soft flags instead of deletes for
+  business records. Orders never depend on live catalogue/address rows — they
+  carry snapshots (§ below). Foreign keys from history rows to mutable rows use
+  `onDelete: SetNull`, so a product can be archived without destroying order
+  history.
+- **Migrations:** Prisma Migrate. `npx prisma migrate dev` in development,
+  `npx prisma migrate deploy` in CI/production (pre-deploy step). Optional
+  `DIRECT_DATABASE_URL` / `SHADOW_DATABASE_URL` for pooled / managed hosts.
+
+### Model groups
+
+| Group     | Models                                                                                                                               |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Identity  | `User`, `Session`, `VerificationToken`, `Address`                                                                                    |
+| Catalogue | `Category`, `Brand`, `Product`, `ProductOption`, `ProductOptionValue`, `ProductVariant`, `ProductVariantOptionValue`, `ProductImage` |
+| Inventory | `InventoryItem`, `StockMovement`                                                                                                     |
+| Cart      | `Cart`, `CartItem`                                                                                                                   |
+| Orders    | `Order`, `OrderItem`, `OrderAddress`, `OrderDiscount`, `Payment`                                                                     |
+| Config    | `TaxRegion`, `TaxRate`, `ShippingZone`, `ShippingZoneRegion`, `ShippingMethod`, `Discount`                                           |
+| Import    | `ImportJob`, `ImportJobRow`                                                                                                          |
+
+### Entity-relationship diagram (core entities)
+
+```mermaid
+erDiagram
+  User ||--o{ Session : has
+  User ||--o{ Address : has
+  User ||--o{ Cart : owns
+  User ||--o{ Order : places
+  User ||--o{ ImportJob : creates
+
+  Category ||--o{ Category : "parent of"
+  Category ||--o{ Product : classifies
+  Brand ||--o{ Product : makes
+
+  Product ||--o{ ProductVariant : "has variants"
+  Product ||--o{ ProductOption : "has options"
+  Product ||--o{ ProductImage : "has images"
+  ProductOption ||--o{ ProductOptionValue : "has values"
+  ProductVariant ||--o{ ProductVariantOptionValue : "composed of"
+  ProductOptionValue ||--o{ ProductVariantOptionValue : "used by"
+
+  ProductVariant ||--|| InventoryItem : "stocked as"
+  InventoryItem ||--o{ StockMovement : "ledger of"
+  ProductVariant ||--o{ CartItem : "added as"
+  ProductVariant ||--o{ OrderItem : "purchased as"
+
+  Cart ||--o{ CartItem : contains
+  Cart ||--o| Order : "converts to"
+
+  Order ||--o{ OrderItem : "line items"
+  Order ||--o{ OrderAddress : "address snapshots"
+  Order ||--o{ OrderDiscount : "applied discounts"
+  Order ||--o{ Payment : "payment attempts"
+  Discount ||--o{ OrderDiscount : "recorded as"
+
+  TaxRegion ||--o{ TaxRate : "has rates"
+  ShippingZone ||--o{ ShippingZoneRegion : "covers"
+  ShippingZone ||--o{ ShippingMethod : "offers"
+
+  ImportJob ||--o{ ImportJobRow : "row results"
+```
 
 ## 5. Product & variant model
 
 A **Product** is the catalogue entity a shopper lands on. A **ProductVariant** is
-the buyable unit and the thing that carries a **SKU**, price, and stock.
+the buyable unit — it carries the **SKU**, price (cents), weight, and stock.
 
-```
-Category ─┬─< Product >─┬─< ProductVariant >──1─ InventoryItem
-Brand ────┘             ├─< ProductImage
-                        └─< VariantAttribute (typed key/value)
-```
-
-- **Product**: `name`, `slug`, `description`, `category`, optional `subcategory`
-  (self-referential category), `brand`, `productType` (e.g. `uniform`, `belt`,
-  `sparring_gear`, `training_equipment`, `accessory`), `taxCategory`, `active`.
-- **ProductVariant**: `sku` (unique, immutable business key), `variantName`,
-  attribute set, `salePriceCents`, optional `compareAtPriceCents`, optional
-  `costPriceCents`, `weightGrams`, optional `barcode`, `active`.
-- **VariantAttribute**: typed dimensions rather than free text —
-  `size`, `colour`, `gender` (`mens|womens|unisex|youth`),
-  `ageGroup` (`adult|youth|child`), plus equipment-specific attributes
-  (e.g. `beltRank`, `protectiveArea`). Enumerations live in the domain layer and
-  are validated on write.
-- A product with no meaningful variation still has exactly one variant (the
-  default), so pricing/stock logic has a single code path.
-- **Pricing:** `salePriceCents` is authoritative. `compareAtPriceCents` is
-  display-only ("was" price). `costPriceCents` is internal (margin reporting),
-  never sent to the storefront.
+- **Product**: `name`, unique `slug`, `description`, `status`
+  (`DRAFT|ACTIVE|ARCHIVED`), `active`, `featured`, optional `categoryId` /
+  `brandId`, free-text `taxCategory` _classifier_ (not a rate), `seoTitle`,
+  `seoDescription`, `publishedAt`. **Product type is not an enum** — the category
+  tree classifies products, so new equipment types need data, not a migration.
+- **ProductVariant**: unique `sku`, optional unique `barcode`, display `name`,
+  `position`, `priceCents`, optional `compareAtPriceCents` ("was" price) and
+  `costCents` (internal, never sent to storefront), `currency`, `weightGrams`,
+  `trackInventory`, `active`.
+- **Options are normalised, not free-text or fixed columns:**
+  `ProductOption` (e.g. "Size", "Colour", "Style", "Gender") →
+  `ProductOptionValue` (e.g. "Small", "Red", "000") →
+  `ProductVariantOptionValue` join. `@@unique([variantId, optionId])` guarantees a
+  variant picks at most one value per option; `@@unique([optionId, value])` and
+  `@@unique([productId, name])` keep the option catalogue clean. This supports
+  arbitrary combinations (Size × Colour × …) without a uniform-specific schema.
+- **Images**: `ProductImage` belongs to a product, optionally narrowed to a
+  variant, with `position`, `altText`, `isPrimary`.
 
 ## 6. Inventory model
 
-- Each `ProductVariant` has one `InventoryItem` with `onHand`, `reserved`, and a
-  derived `available = onHand - reserved`.
-- `low_stock_threshold` per item drives admin alerts; it does not block sales.
-- **Every quantity change is a `StockMovement`** (`type`: `receive`, `sale`,
-  `return`, `adjustment`, `import`; `delta`; `reason`; `actorId`;
-  `sourceRef`). `onHand` is the sum of movements — the ledger is the source of
-  truth, the column is a cache updated in the same transaction.
-- **Reservation:** stock is reserved when an order is placed (payment intent
-  created) and either committed on payment success or released on
-  cancellation/expiry.
-- **Overselling:** guarded at checkout inside the order transaction with a
-  conditional update (`available >= qty`); no optimistic UI promises.
-- Phase 1 does not implement this; the model is fixed now so the import pipeline
-  and checkout can rely on it.
+- Each `ProductVariant` has exactly one `InventoryItem`
+  (`@@unique` on `variantId`) with `quantityOnHand`, `quantityReserved`, optional
+  `reorderLevel` / `reorderQuantity`. `available = onHand − reserved` is derived
+  in the domain layer, not stored.
+- **`StockMovement` is an append-only ledger.** Types: `INITIAL`, `PURCHASE`,
+  `SALE`, `RETURN`, `ADJUSTMENT`, `RESERVATION`, `RELEASE`. Each row has a signed
+  `quantityDelta`, optional `reason` / `reference` (order number, import job id)
+  and optional `actorId`. The sum of deltas reconciles the `InventoryItem`
+  counters; from Phase 5 the counter and the movement are written in one
+  transaction.
+- All quantities are integers. There is no compelling reason for fractional
+  stock in this domain.
+- **Reservation / oversell protection** (behaviour, added in Phase 5–6): stock is
+  reserved when an order is created and committed on payment or released on
+  cancellation; the reserving update is conditional (`available >= qty`) inside
+  the order transaction.
+
+## 6a. Historical order snapshots
+
+Orders must remain accurate even after the catalogue changes:
+
+- **`OrderItem`** stores `sku`, `productName`, `variantName`, and an
+  `optionsSnapshot` JSON at purchase time, plus `unitPriceCents`, `quantity`,
+  `lineSubtotalCents`, `lineDiscountCents`, `lineTaxCents`, `lineTotalCents`.
+  `productId` / `variantId` are nullable references kept for convenience only.
+- **`OrderAddress`** is an immutable copy of the shipping/billing address
+  (`@@unique([orderId, type])`), independent of the customer's saved `Address`
+  rows.
+- **`OrderDiscount`** snapshots the `code`, `description`, and applied
+  `amountCents`; the `discountId` link is `SetNull` on delete.
+- **`Order`** freezes `subtotalCents`, `discountCents`, `shippingCents`,
+  `taxCents`, `totalCents`, and `currency`, plus `status` / `paymentStatus` /
+  `fulfillmentStatus` enums and `customerEmail` (so guest orders survive without
+  a `User`).
 
 ## 7. Spreadsheet import pipeline
 
@@ -241,50 +325,74 @@ Cart ─▶ Address & shipping method ─▶ Tax + shipping quote ─▶ Review
 
 ## 11. Tax boundary
 
-- Interface `TaxCalculator`: `quote(lineItems, shipTo, taxCategories) → TaxBreakdown`.
-- **The platform ships no tax rates.** Implementations:
-  - `ConfiguredRateTaxCalculator` — rates supplied by the business via admin
-    configuration / env, stored in a `TaxRate` table keyed by province and tax
-    category. Rates are data, entered by the operator, never committed to source.
-  - `ExternalTaxCalculator` — adapter for a third-party tax service, added if/when
-    required.
-- Tax category per product (`tax_category` column, e.g. `standard`,
-  `exempt`, `childrens_clothing`) lets the operator model category-specific
-  Canadian rules without the codebase asserting what those rules are.
-- Tax is quoted at checkout and frozen onto the `Order`.
+- Interface `TaxCalculator`: `quote(lineItems, shipTo, taxCategories) → TaxBreakdown`
+  _(added in a later phase)_.
+- **The platform ships no tax rates.** Rates are operator data, held in
+  `TaxRegion` (country + optional province, `@@unique([country, province])`) and
+  `TaxRate` (`name`, exact `Decimal(9,6)` `rate`, optional `taxCategory`,
+  `priority`, `compound`, `effectiveFrom` / `effectiveTo`,
+  `@@unique([regionId, name, taxCategory])`). The initial migration seeds an
+  **example** Ontario/HST row via the seed script; production values are entered
+  by the operator, never committed to source.
+- `Product.taxCategory` is a free-text classifier (`"standard"`,
+  `"childrens_clothing"`, …). A `TaxRate` with an empty `taxCategory` applies to
+  every product.
+- Computation (later phase): `taxCents = round(taxableCents * rate)`, quoted at
+  checkout and frozen onto the `Order` / `OrderItem`.
+- Implementations will include `ConfiguredRateTaxCalculator` (the tables above)
+  and an `ExternalTaxCalculator` adapter if a third-party service is adopted.
 
 ## 12. Shipping boundary
 
-- Interface `ShippingRateProvider`: `rates(parcel, shipFrom, shipTo) → ShippingOption[]`.
-- Implementations:
-  - `FlatRateShippingProvider` — operator-configured rules (by province, weight
-    band, order subtotal, free-shipping threshold). Rules are data.
-  - `CarrierApiShippingProvider` — adapter for a carrier/aggregator API, added
-    later.
-- `weight_grams` on every variant feeds parcel weight.
-- Selected option and price are frozen onto the `Order`.
+- Interface `ShippingRateProvider`: `rates(parcel, shipFrom, shipTo) → ShippingOption[]`
+  _(added in a later phase)_.
+- **No shipping prices in code.** Operator data lives in `ShippingZone`,
+  `ShippingZoneRegion` (country + optional province), and `ShippingMethod`
+  (`flatRateCents`, optional `freeShippingThresholdCents`, delivery-day range,
+  `sortOrder`, `active`). The seed script adds an **example** "Canada / Standard"
+  method.
+- `ProductVariant.weightGrams` feeds parcel weight.
+- The selected option and its price are frozen onto the `Order`.
+- Implementations will include `FlatRateShippingProvider` (the tables above) and
+  a `CarrierApiShippingProvider` adapter later.
+
+## 12a. Migration workflow
+
+| Context         | Command                                                                                                                            |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Author a change | edit `prisma/schema.prisma` → `npm run db:format` → `npm run db:migrate` (creates a timestamped folder under `prisma/migrations/`) |
+| Fresh dev DB    | `docker compose up -d` → `npm run db:deploy` → `npm run db:seed`                                                                   |
+| CI / production | `npx prisma migrate deploy` as a pre-deploy step (no `dev`, no data loss)                                                          |
+| Inspect         | `npm run db:migrate:status`, `npm run db:studio`                                                                                   |
+| Reset dev DB    | `npm run db:reset` (drops, re-applies, re-seeds — dev only)                                                                        |
+
+The initial migration `20260903000000_init` was generated with
+`prisma migrate diff --from-empty` (see § "Migration status" in the Phase 2
+report) because no PostgreSQL instance was available in the authoring
+environment; it applies cleanly with `migrate deploy` against an empty database.
+Migrations are written expand/contract so one release stays backward-compatible.
 
 ## 13. Security controls
 
-| Area              | Control                                                                                          |
-| ----------------- | ------------------------------------------------------------------------------------------------ |
-| Configuration     | All env vars validated at startup (`src/server/config/env.ts`); fail fast; no secret defaults    |
-| Secrets           | Server-only; never imported into client bundles; `.env` git-ignored; `.env.example` names only   |
-| AuthN             | Auth.js, Argon2id password hashing, database sessions, revocable staff access                    |
-| AuthZ             | Middleware gate + mandatory server-side role guards on every admin/account operation             |
-| Transport         | HTTPS enforced at the edge; HSTS; secure, `HttpOnly`, `SameSite` cookies                         |
-| Input validation  | Zod at every trust boundary (forms, route handlers, server actions, import rows)                 |
-| Output / XSS      | React escaping by default; no `dangerouslySetInnerHTML` without sanitisation                     |
-| SQL injection     | Prisma parameterised queries only; no raw string SQL                                             |
-| CSRF              | Server-action origin checks; same-origin + auth on mutating route handlers                       |
-| File upload       | Extension + MIME allow-list, size/row caps, streamed parsing, stored out of web root             |
-| Formula injection | Import cells starting with `= + - @` neutralised; formulas never evaluated                       |
-| Payment data      | Never stored; PCI scope minimised via Stripe-hosted elements                                     |
-| Rate limiting     | Auth endpoints, import upload, webhook — token-bucket per IP / per user                          |
-| Headers           | CSP, `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options` via `next.config`/middleware |
-| Auditing          | `AuditLog` for admin mutations, imports, order state changes, auth events                        |
-| Dependencies      | Lockfile committed; `npm audit` in CI; Dependabot/Renovate later                                 |
-| PII               | Minimal collection; no real customer/business data in fixtures or seeds                          |
+| Area              | Control                                                                                                                                                     |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Configuration     | All env vars validated at startup (`src/server/config/env.ts`); fail fast; no secret defaults                                                               |
+| Secrets           | Server-only; never imported into client bundles; `.env` git-ignored; `.env.example` names only                                                              |
+| AuthN             | Auth.js, Argon2id password hashing, database sessions, revocable staff access                                                                               |
+| AuthZ             | Middleware gate + mandatory server-side role guards on every admin/account operation                                                                        |
+| Transport         | HTTPS enforced at the edge; HSTS; secure, `HttpOnly`, `SameSite` cookies                                                                                    |
+| Input validation  | Zod at every trust boundary (forms, route handlers, server actions, import rows)                                                                            |
+| Output / XSS      | React escaping by default; no `dangerouslySetInnerHTML` without sanitisation                                                                                |
+| SQL injection     | Prisma parameterised queries only; no raw string SQL                                                                                                        |
+| CSRF              | Server-action origin checks; same-origin + auth on mutating route handlers                                                                                  |
+| File upload       | Extension + MIME allow-list, size/row caps, streamed parsing, stored out of web root                                                                        |
+| Formula injection | Import cells starting with `= + - @` neutralised; formulas never evaluated                                                                                  |
+| Payment data      | Never stored; PCI scope minimised via Stripe-hosted elements                                                                                                |
+| Rate limiting     | Auth endpoints, import upload, webhook — token-bucket per IP / per user                                                                                     |
+| Headers           | CSP, `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options` via `next.config`/middleware                                                            |
+| Auditing          | `ImportJob` / `ImportJobRow` track imports (Phase 2). A generic `AuditLog` for admin mutations, order state changes, and auth events is planned for Phase 3 |
+| Dependencies      | Lockfile committed; `npm audit` in CI; Dependabot/Renovate later                                                                                            |
+| PII               | Minimal collection; no real customer/business data in fixtures or seeds                                                                                     |
 
 ## 14. Testing strategy
 
@@ -328,17 +436,20 @@ Cart ─▶ Address & shipping method ─▶ Tax + shipping quote ─▶ Review
 
 ## 16. Key technical decisions & trade-offs
 
-| Decision                                             | Rationale                                                                                                   | Trade-off / revisit trigger                                             |
-| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Single Next.js app (modular monolith), no services   | Small team, one product; simplest thing that meets every requirement                                        | If admin/import load competes with storefront, extract a worker/service |
-| App Router + React Server Components                 | Less client JS, straightforward data loading, first-class in Next 16                                        | Async Server Components can't be unit-tested — covered by e2e instead   |
-| PostgreSQL + Prisma                                  | Relational data (orders, inventory ledger) wants transactions & FKs; Prisma gives typed access + migrations | Prisma raw-SQL escape hatch used sparingly for hot queries              |
-| Prisma client only in `src/server/db`                | Keeps queries reviewable; enables later caching/replicas                                                    | Slight indirection cost                                                 |
-| Money as integer cents (CAD only for now)            | Avoids float errors; matches Stripe's smallest-unit model                                                   | Multi-currency needs a currency column + FX policy later                |
-| Typed variant attributes (not free-text)             | Enables faceted search, clean filters, reliable import validation                                           | Adding a new attribute type is a schema migration                       |
-| `exceljs` + `csv-parse` for import (not SheetJS)     | Streaming, actively maintained, smaller supply-chain risk                                                   | Fewer exotic format features                                            |
-| Everything behind provider interfaces (pay/tax/ship) | Requirement; avoids vendor lock-in; testable with fakes                                                     | A little upfront abstraction before the second implementation exists    |
-| Auth.js database sessions                            | Immediate staff revocation, adapter matches Prisma                                                          | Extra DB read per request vs. JWT — acceptable at this scale            |
-| Tailwind CSS v4                                      | Fast styling, ships with the scaffold, good for a design-token system                                       | Utility-heavy markup; mitigated by the shared component layer           |
-| npm (not pnpm/yarn)                                  | Available in the environment; lockfile committed                                                            | Switch is low-cost if the team prefers pnpm                             |
-| No i18n library yet, but "multilingual-ready"        | Avoid premature complexity; keep copy in components extractable                                             | Introduce `next-intl` when a second locale (fr-CA) is scheduled         |
+| Decision                                                                                                                      | Rationale                                                                                                                                                                                                              | Trade-off / revisit trigger                                                                       |
+| ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Single Next.js app (modular monolith), no services                                                                            | Small team, one product; simplest thing that meets every requirement                                                                                                                                                   | If admin/import load competes with storefront, extract a worker/service                           |
+| App Router + React Server Components                                                                                          | Less client JS, straightforward data loading, first-class in Next 16                                                                                                                                                   | Async Server Components can't be unit-tested — covered by e2e instead                             |
+| PostgreSQL + Prisma, pinned to **6.19.x** (not 7.x/8.x-rc)                                                                    | Relational data (orders, inventory ledger) wants transactions & FKs; 6.x has the mature, documented `migrate`/`generate` workflow. npm's `latest` tag currently points at an 8.0 release candidate and 7.x is very new | Upgrade to 7.x once it settles; that upgrade also moves seed config fully into `prisma.config.ts` |
+| Prisma client only in `src/server/db`                                                                                         | Keeps queries reviewable; enables later caching/replicas                                                                                                                                                               | Slight indirection cost                                                                           |
+| Money as integer cents; `Currency` enum defaulting CAD                                                                        | Avoids float errors; matches Stripe's smallest-unit model                                                                                                                                                              | Multi-currency needs FX policy + per-currency pricing later                                       |
+| Rates (tax/discount) as `Decimal`, results as cents                                                                           | Exact fractions without float drift; money stays integer                                                                                                                                                               | `Decimal` needs the domain layer to convert deliberately                                          |
+| Normalised product options (`ProductOption` → `Value` → variant join)                                                         | Arbitrary Size × Colour × … combinations; not uniform-specific; clean import validation                                                                                                                                | A variant's option set is several rows, not columns — repository layer hides this                 |
+| `""` sentinel (not `NULL`) for "applies to all" in `TaxRate.taxCategory`, `TaxRegion.province`, `ShippingZoneRegion.province` | Lets these participate in composite `@@unique` keys and be targeted by `upsert` (Postgres treats `NULL` as distinct)                                                                                                   | Slightly less obvious than `NULL`; documented in the schema                                       |
+| Order data is snapshotted (`OrderItem`, `OrderAddress`, `OrderDiscount`)                                                      | History stays correct after catalogue/address edits; FKs are `SetNull`                                                                                                                                                 | Some duplication between live and snapshot fields                                                 |
+| `exceljs` + `csv-parse` for import (not SheetJS)                                                                              | Streaming, actively maintained, smaller supply-chain risk                                                                                                                                                              | Fewer exotic format features                                                                      |
+| Everything behind provider interfaces (pay/tax/ship)                                                                          | Requirement; avoids vendor lock-in; testable with fakes                                                                                                                                                                | A little upfront abstraction before the second implementation exists                              |
+| Auth.js database sessions                                                                                                     | Immediate staff revocation, adapter matches Prisma                                                                                                                                                                     | Extra DB read per request vs. JWT — acceptable at this scale                                      |
+| Tailwind CSS v4                                                                                                               | Fast styling, ships with the scaffold, good for a design-token system                                                                                                                                                  | Utility-heavy markup; mitigated by the shared component layer                                     |
+| npm (not pnpm/yarn)                                                                                                           | Available in the environment; lockfile committed                                                                                                                                                                       | Switch is low-cost if the team prefers pnpm                                                       |
+| No i18n library yet, but "multilingual-ready"                                                                                 | Avoid premature complexity; keep copy in components extractable                                                                                                                                                        | Introduce `next-intl` when a second locale (fr-CA) is scheduled                                   |

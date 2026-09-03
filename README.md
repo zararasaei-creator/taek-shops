@@ -4,10 +4,10 @@ A secure, maintainable, responsive, multilingual-ready **Canadian e-commerce
 platform** for taekwondo uniforms, belts, protective gear, training equipment,
 and accessories.
 
-> **Project status: Phase 1 (foundation).** This repository currently contains
-> the application shell, toolchain, and design documents only. The storefront,
-> admin dashboard, database schema, payments, and the spreadsheet importer are
-> planned work — see the roadmap.
+> **Project status: Phase 2 (database foundation).** The application shell,
+> toolchain, design documents, and the full Prisma/PostgreSQL schema + initial
+> migration are in place. The storefront, admin dashboard, authentication,
+> payments, and the spreadsheet importer are planned work — see the roadmap.
 
 ## Documentation
 
@@ -21,16 +21,17 @@ and accessories.
 ## Tech stack
 
 Next.js 16 (App Router) · TypeScript (strict) · React 19 · Tailwind CSS v4 ·
-Zod · Vitest + Testing Library · Playwright · ESLint · Prettier ·
-PostgreSQL + Prisma _(from Phase 2)_ · Auth.js _(from Phase 3)_ ·
+Zod · PostgreSQL + Prisma 6.19 · Vitest + Testing Library · Playwright · ESLint ·
+Prettier · Auth.js _(from Phase 3)_ ·
 Stripe / S3-compatible storage _(later phases, behind interfaces)_.
 
 ## Prerequisites
 
-- **Node.js ≥ 20.11** and **npm ≥ 10** (this repo uses npm; the lockfile is
-  committed).
-- **Docker** + Docker Compose — for the local PostgreSQL instance (needed from
-  Phase 2; not required to run the Phase 1 shell).
+- **Node.js ≥ 22.18** and **npm ≥ 10** (this repo uses npm; the lockfile is
+  committed). Node 22.18+ runs the TypeScript seed script directly, with no
+  extra tooling.
+- **Docker** + Docker Compose — for the local PostgreSQL instance (required from
+  Phase 2 on).
 
 ## Local setup
 
@@ -50,34 +51,54 @@ cp .env.example .env   # then edit .env
   `.env` and fill in real values. **Never commit `.env`.**
 - Browser-exposed values must be prefixed `NEXT_PUBLIC_`. Everything else is
   server-only and never bundled for the client.
-- For Phase 1 the shell runs with no `.env` at all (safe defaults apply).
+- From Phase 2, `DATABASE_URL` is required; other integrations (auth, Stripe,
+  storage) remain optional until their phase.
 
 ## Database (local)
 
+Requires Docker. `DATABASE_URL` is **required** from Phase 2 on.
+
 ```bash
-# Set POSTGRES_PASSWORD (and optionally POSTGRES_USER/DB/PORT) in .env first.
-docker compose up -d        # start PostgreSQL 17
-docker compose ps           # check health
-docker compose down         # stop (data persists in the named volume)
-docker compose down -v      # stop and delete data
+# 1. Set POSTGRES_PASSWORD (and optionally POSTGRES_USER/DB/PORT) in .env
+# 2. Set DATABASE_URL in .env, e.g.:
+#    postgresql://taek:<password>@localhost:5432/taek_shops?schema=public
+docker compose up -d          # start PostgreSQL 17
+npm run db:deploy             # apply migrations to a clean database
+npm run db:seed               # load synthetic development data (idempotent)
+docker compose down           # stop (data persists in the named volume)
+docker compose down -v        # stop and delete data
 ```
 
-Then set `DATABASE_URL` in `.env`, e.g.
-`postgresql://taek:<password>@localhost:5432/taek_shops`.
-Prisma schema and migrations arrive in Phase 2.
+Schema of record: [`prisma/schema.prisma`](prisma/schema.prisma).
+See [architecture.md](docs/architecture.md) § "Database architecture" and
+§ "Migration workflow".
 
 ## Development commands
 
-| Command                | What it does                                     |
-| ---------------------- | ------------------------------------------------ |
-| `npm run dev`          | Start the dev server (http://localhost:3000)     |
-| `npm run build`        | Production build (`output: "standalone"`)        |
-| `npm start`            | Run the production build (after `npm run build`) |
-| `npm run lint`         | ESLint                                           |
-| `npm run lint:fix`     | ESLint with autofix                              |
-| `npm run typecheck`    | `next typegen` + `tsc --noEmit`                  |
-| `npm run format`       | Prettier write                                   |
-| `npm run format:check` | Prettier check (used in CI)                      |
+| Command                | What it does                                        |
+| ---------------------- | --------------------------------------------------- |
+| `npm run dev`          | Start the dev server (http://localhost:3000)        |
+| `npm run build`        | Production build (`output: "standalone"`)           |
+| `npm start`            | Run the production build (after `npm run build`)    |
+| `npm run lint`         | ESLint                                              |
+| `npm run lint:fix`     | ESLint with autofix                                 |
+| `npm run typecheck`    | `prisma generate` + `next typegen` + `tsc --noEmit` |
+| `npm run format`       | Prettier write                                      |
+| `npm run format:check` | Prettier check (used in CI)                         |
+
+## Database commands
+
+| Command                     | What it does                               |
+| --------------------------- | ------------------------------------------ |
+| `npm run db:migrate`        | Create + apply a migration in development  |
+| `npm run db:deploy`         | Apply pending migrations (CI / production) |
+| `npm run db:migrate:status` | Show migration state                       |
+| `npm run db:seed`           | Run the synthetic seed (`prisma/seed.ts`)  |
+| `npm run db:generate`       | Regenerate the Prisma client               |
+| `npm run db:validate`       | Validate `schema.prisma`                   |
+| `npm run db:format`         | Format `schema.prisma`                     |
+| `npm run db:studio`         | Open Prisma Studio                         |
+| `npm run db:reset`          | Drop, re-migrate, re-seed (**dev only**)   |
 
 ## Test commands
 
@@ -113,15 +134,20 @@ src/
   components/ui/         Shared, accessible UI components
   lib/
     utils/               Small framework-agnostic helpers
-    validation/          Shared Zod schemas (Phase 2+)
+    validation/          Shared Zod schemas (Phase 4+)
   server/
     config/env.ts        Validated environment configuration
     auth/                Auth.js integration (Phase 3)
-    domain/              Business logic (Phase 2+)
-    db/                  Database access — Prisma (Phase 2+)
+    domain/money.ts      Integer-cents money helper
+    db/client.ts         Prisma client singleton
     import/              Spreadsheet import pipeline (Phase 10)
+prisma/
+  schema.prisma          Database schema of record (29 models, 19 enums)
+  migrations/            Migration history
+  seed.ts                Synthetic development seed
+prisma.config.ts         Prisma CLI configuration
 tests/
-  unit/                  Vitest
+  unit/                  Vitest (schema invariants, money, env, client)
   e2e/                   Playwright
 docs/                    Architecture, roadmap, import spec
 infra/                   Deployment assets

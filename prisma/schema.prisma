@@ -1,0 +1,796 @@
+// Taek Shops — Prisma schema (Phase 2: database foundation).
+//
+// Conventions
+// - IDs: `String @id @default(cuid())` everywhere.
+// - Money: integer CENTS (`Int`) only. Never Float/Decimal for money.
+//   Example: CAD $29.99 => 2999.
+// - Rates (tax %, discount %): `Decimal` for exact representation; results are
+//   converted to integer cents by the (future) domain layer.
+// - Currency: `Currency` enum, defaults to CAD.
+// - Timestamps: `createdAt` / `updatedAt` on mutable rows; append-only ledgers
+//   (StockMovement, order snapshots, tokens) keep only `createdAt`.
+// - History-bearing records use status enums / soft flags, not hard deletes.
+// - country: ISO-3166-1 alpha-2 ("CA"). province: subdivision code ("ON").
+//   Validated in the application layer, not constrained here, for extensibility.
+//
+// No application logic lives here. See docs/architecture.md and
+// docs/product-import-specification.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+enum Currency {
+  CAD
+}
+
+enum UserRole {
+  CUSTOMER
+  STAFF
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum VerificationPurpose {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+}
+
+enum AddressType {
+  SHIPPING
+  BILLING
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum StockMovementType {
+  INITIAL
+  PURCHASE
+  SALE
+  RETURN
+  ADJUSTMENT
+  RESERVATION
+  RELEASE
+}
+
+enum CartStatus {
+  ACTIVE
+  CONVERTED
+  ABANDONED
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  UNPAID
+  AUTHORIZED
+  PAID
+  PARTIALLY_REFUNDED
+  REFUNDED
+  FAILED
+}
+
+enum FulfillmentStatus {
+  UNFULFILLED
+  PARTIALLY_FULFILLED
+  FULFILLED
+  RETURNED
+}
+
+enum OrderAddressType {
+  SHIPPING
+  BILLING
+}
+
+enum PaymentTransactionStatus {
+  PENDING
+  REQUIRES_ACTION
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  CANCELLED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED_AMOUNT
+}
+
+enum DiscountStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  EXPIRED
+}
+
+enum ImportJobType {
+  PRODUCT
+}
+
+enum ImportJobSourceFormat {
+  CSV
+  XLSX
+}
+
+enum ImportJobStatus {
+  PENDING
+  VALIDATING
+  VALIDATED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ImportRowStatus {
+  PENDING
+  CREATED
+  UPDATED
+  SKIPPED
+  NO_CHANGE
+  FAILED
+}
+
+// ============================================================================
+// Identity
+// ============================================================================
+
+model User {
+  id              String     @id @default(cuid())
+  email           String     @unique
+  emailVerifiedAt DateTime?
+  passwordHash    String?
+  firstName       String?
+  lastName        String?
+  phone           String?
+  role            UserRole   @default(CUSTOMER)
+  status          UserStatus @default(ACTIVE)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  sessions       Session[]
+  addresses      Address[]
+  carts          Cart[]
+  orders         Order[]
+  importJobs     ImportJob[]     @relation("ImportJobCreatedBy")
+  stockMovements StockMovement[] @relation("StockMovementActor")
+
+  @@index([role])
+  @@index([status])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model VerificationToken {
+  id         String              @id @default(cuid())
+  identifier String // normalised email address
+  tokenHash  String              @unique
+  purpose    VerificationPurpose
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime            @default(now())
+
+  @@index([identifier])
+  @@index([expiresAt])
+}
+
+model Address {
+  id                String      @id @default(cuid())
+  userId            String
+  type              AddressType @default(SHIPPING)
+  isDefaultShipping Boolean     @default(false)
+  isDefaultBilling  Boolean     @default(false)
+  firstName         String
+  lastName          String
+  company           String?
+  line1             String
+  line2             String?
+  city              String
+  province          String
+  postalCode        String
+  country           String      @default("CA")
+  phone             String?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, type])
+}
+
+// ============================================================================
+// Catalogue
+// ============================================================================
+
+model Category {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  description String?
+  parentId    String?
+  active      Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryTree")
+  products Product[]
+
+  @@index([parentId])
+  @@index([active])
+  @@index([sortOrder])
+}
+
+model Brand {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  slug        String   @unique
+  description String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products Product[]
+}
+
+model Product {
+  id             String        @id @default(cuid())
+  name           String
+  slug           String        @unique
+  description    String?
+  status         ProductStatus @default(DRAFT)
+  active         Boolean       @default(false)
+  featured       Boolean       @default(false)
+  categoryId     String?
+  brandId        String?
+  // Free-form tax classifier (e.g. "standard", "childrens_clothing"). NOT a rate.
+  taxCategory    String?
+  seoTitle       String?
+  seoDescription String?
+  publishedAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  category   Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  brand      Brand?           @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  variants   ProductVariant[]
+  options    ProductOption[]
+  images     ProductImage[]
+  orderItems OrderItem[]
+
+  @@index([categoryId])
+  @@index([brandId])
+  @@index([status])
+  @@index([active])
+  @@index([featured])
+}
+
+model ProductOption {
+  id        String   @id @default(cuid())
+  productId String
+  name      String // "Size", "Colour", "Style", "Gender", ...
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product           Product                     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  values            ProductOptionValue[]
+  variantSelections ProductVariantOptionValue[]
+
+  @@unique([productId, name])
+  @@index([productId])
+}
+
+model ProductOptionValue {
+  id        String   @id @default(cuid())
+  optionId  String
+  value     String // "Small", "Red", "000", ...
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  option            ProductOption               @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  variantSelections ProductVariantOptionValue[]
+
+  @@unique([optionId, value])
+  @@index([optionId])
+}
+
+model ProductVariant {
+  id                  String   @id @default(cuid())
+  productId           String
+  sku                 String   @unique
+  barcode             String?  @unique
+  name                String? // display title, e.g. "White / 140cm"
+  position            Int      @default(0)
+  priceCents          Int
+  compareAtPriceCents Int?
+  costCents           Int?
+  currency            Currency @default(CAD)
+  weightGrams         Int?
+  trackInventory      Boolean  @default(true)
+  active              Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  product        Product                     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  optionValues   ProductVariantOptionValue[]
+  images         ProductImage[]
+  inventoryItem  InventoryItem?
+  stockMovements StockMovement[]
+  cartItems      CartItem[]
+  orderItems     OrderItem[]
+
+  @@index([productId])
+  @@index([active])
+}
+
+// Join table: which option value(s) a variant is composed of.
+// `@@unique([variantId, optionId])` => at most one value per option per variant.
+model ProductVariantOptionValue {
+  variantId     String
+  optionId      String
+  optionValueId String
+
+  variant     ProductVariant     @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  option      ProductOption      @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  optionValue ProductOptionValue @relation(fields: [optionValueId], references: [id], onDelete: Cascade)
+
+  @@id([variantId, optionValueId])
+  @@unique([variantId, optionId])
+  @@index([optionValueId])
+  @@index([optionId])
+}
+
+model ProductImage {
+  id        String   @id @default(cuid())
+  productId String
+  variantId String?
+  url       String
+  altText   String?
+  position  Int      @default(0)
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  @@index([productId])
+  @@index([variantId])
+}
+
+// ============================================================================
+// Inventory
+// ============================================================================
+
+model InventoryItem {
+  id               String   @id @default(cuid())
+  variantId        String   @unique
+  quantityOnHand   Int      @default(0)
+  quantityReserved Int      @default(0)
+  reorderLevel     Int?
+  reorderQuantity  Int?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  variant   ProductVariant  @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  movements StockMovement[]
+
+  @@index([variantId])
+}
+
+// Append-only ledger. Sum of `quantityDelta` reconciles InventoryItem quantities.
+model StockMovement {
+  id              String            @id @default(cuid())
+  inventoryItemId String
+  variantId       String
+  type            StockMovementType
+  quantityDelta   Int // signed: +receipt / -consumption
+  reason          String?
+  reference       String? // e.g. order number, import job id
+  actorId         String?
+  createdAt       DateTime          @default(now())
+
+  inventoryItem InventoryItem  @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
+  variant       ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  actor         User?          @relation("StockMovementActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([inventoryItemId])
+  @@index([variantId])
+  @@index([type])
+  @@index([reference])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// Cart
+// ============================================================================
+
+model Cart {
+  id        String     @id @default(cuid())
+  userId    String?
+  token     String     @unique // opaque identifier for guest/authenticated carts
+  status    CartStatus @default(ACTIVE)
+  currency  Currency   @default(CAD)
+  expiresAt DateTime?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  user  User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  items CartItem[]
+  order Order?
+
+  @@index([userId])
+  @@index([status])
+}
+
+model CartItem {
+  id        String   @id @default(cuid())
+  cartId    String
+  variantId String
+  quantity  Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cart    Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([cartId, variantId])
+  @@index([cartId])
+  @@index([variantId])
+}
+
+// ============================================================================
+// Orders (history-preserving: snapshots, no hard deletes)
+// ============================================================================
+
+model Order {
+  id                String            @id @default(cuid())
+  orderNumber       String            @unique
+  userId            String?
+  cartId            String?           @unique
+  customerEmail     String
+  customerPhone     String?
+  status            OrderStatus       @default(PENDING)
+  paymentStatus     PaymentStatus     @default(UNPAID)
+  fulfillmentStatus FulfillmentStatus @default(UNFULFILLED)
+  currency          Currency          @default(CAD)
+
+  subtotalCents Int @default(0)
+  discountCents Int @default(0)
+  shippingCents Int @default(0)
+  taxCents      Int @default(0)
+  totalCents    Int @default(0)
+
+  customerNote String?
+  placedAt     DateTime?
+  cancelledAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user      User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  cart      Cart?           @relation(fields: [cartId], references: [id], onDelete: SetNull)
+  items     OrderItem[]
+  addresses OrderAddress[]
+  payments  Payment[]
+  discounts OrderDiscount[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([paymentStatus])
+  @@index([fulfillmentStatus])
+  @@index([customerEmail])
+  @@index([createdAt])
+}
+
+// Snapshots product/variant data at purchase time; live refs are nullable.
+model OrderItem {
+  id                String   @id @default(cuid())
+  orderId           String
+  productId         String?
+  variantId         String?
+  sku               String // snapshot
+  productName       String // snapshot
+  variantName       String? // snapshot
+  optionsSnapshot   Json? // snapshot of [{ option, value }]
+  unitPriceCents    Int
+  quantity          Int
+  lineSubtotalCents Int // unitPriceCents * quantity
+  lineDiscountCents Int      @default(0)
+  lineTaxCents      Int      @default(0)
+  lineTotalCents    Int
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  order   Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product?        @relation(fields: [productId], references: [id], onDelete: SetNull)
+  variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([productId])
+  @@index([variantId])
+  @@index([sku])
+}
+
+// Immutable address snapshot captured onto the order.
+model OrderAddress {
+  id         String           @id @default(cuid())
+  orderId    String
+  type       OrderAddressType
+  firstName  String
+  lastName   String
+  company    String?
+  line1      String
+  line2      String?
+  city       String
+  province   String
+  postalCode String
+  country    String
+  phone      String?
+  createdAt  DateTime         @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, type])
+  @@index([orderId])
+}
+
+// ============================================================================
+// Payments (no raw card data — provider references only)
+// ============================================================================
+
+model Payment {
+  id                String                   @id @default(cuid())
+  orderId           String
+  provider          String // "stripe", "manual", ...
+  providerPaymentId String?
+  status            PaymentTransactionStatus @default(PENDING)
+  amountCents       Int
+  currency          Currency                 @default(CAD)
+  refundedCents     Int                      @default(0)
+  errorMessage      String?
+  metadata          Json?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerPaymentId])
+  @@index([orderId])
+  @@index([status])
+}
+
+// ============================================================================
+// Tax configuration (operator-configurable; no rates hard-coded)
+// ============================================================================
+
+model TaxRegion {
+  id        String   @id @default(cuid())
+  name      String // "Ontario"
+  country   String   @default("CA")
+  province  String   @default("") // "ON"; "" => country-wide (empty, not null, so it participates in the unique key)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  rates TaxRate[]
+
+  @@unique([country, province])
+  @@index([active])
+}
+
+model TaxRate {
+  id            String    @id @default(cuid())
+  regionId      String
+  name          String // "HST", "GST", "PST"
+  // Exact fractional rate. 0.130000 == 13%. Applied as:
+  // taxCents = round(taxableCents * rate).
+  rate          Decimal   @db.Decimal(9, 6)
+  taxCategory   String    @default("") // "" => applies to every product tax category (empty, not null, for the unique key)
+  priority      Int       @default(0)
+  compound      Boolean   @default(false)
+  active        Boolean   @default(true)
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  region TaxRegion @relation(fields: [regionId], references: [id], onDelete: Cascade)
+
+  @@unique([regionId, name, taxCategory])
+  @@index([regionId])
+  @@index([active])
+}
+
+// ============================================================================
+// Shipping configuration (operator-configurable; no prices hard-coded)
+// ============================================================================
+
+model ShippingZone {
+  id        String   @id @default(cuid())
+  name      String   @unique // "Canada", "Ontario", "Rest of Canada"
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  regions ShippingZoneRegion[]
+  methods ShippingMethod[]
+
+  @@index([active])
+}
+
+model ShippingZoneRegion {
+  id       String @id @default(cuid())
+  zoneId   String
+  country  String @default("CA")
+  province String @default("") // "" => whole country (empty, not null, for the unique key)
+
+  zone ShippingZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+
+  @@unique([zoneId, country, province])
+  @@index([zoneId])
+}
+
+model ShippingMethod {
+  id                         String   @id @default(cuid())
+  zoneId                     String
+  name                       String // "Standard", "Express"
+  description                String?
+  flatRateCents              Int      @default(0)
+  freeShippingThresholdCents Int? // order subtotal at/above which shipping is free
+  minDeliveryDays            Int?
+  maxDeliveryDays            Int?
+  active                     Boolean  @default(true)
+  sortOrder                  Int      @default(0)
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  zone ShippingZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+
+  @@unique([zoneId, name])
+  @@index([zoneId])
+  @@index([active])
+}
+
+// ============================================================================
+// Discounts / promotions (foundation only — no engine logic)
+// ============================================================================
+
+model Discount {
+  id                    String         @id @default(cuid())
+  code                  String         @unique
+  description           String?
+  type                  DiscountType
+  // PERCENTAGE => `percentage` (0.1500 == 15%). FIXED_AMOUNT => `amountCents`.
+  percentage            Decimal?       @db.Decimal(5, 4)
+  amountCents           Int?
+  currency              Currency       @default(CAD)
+  minOrderSubtotalCents Int?
+  status                DiscountStatus @default(DRAFT)
+  startsAt              DateTime?
+  endsAt                DateTime?
+  maxRedemptions        Int?
+  maxRedemptionsPerUser Int?
+  timesRedeemed         Int            @default(0)
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  orderDiscounts OrderDiscount[]
+
+  @@index([status])
+}
+
+// Snapshot of a discount as actually applied to an order.
+model OrderDiscount {
+  id          String   @id @default(cuid())
+  orderId     String
+  discountId  String?
+  code        String // snapshot
+  description String? // snapshot
+  amountCents Int // actual amount applied
+  createdAt   DateTime @default(now())
+
+  order    Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  discount Discount? @relation(fields: [discountId], references: [id], onDelete: SetNull)
+
+  @@unique([orderId, code])
+  @@index([orderId])
+  @@index([discountId])
+}
+
+// ============================================================================
+// Import tracking (auditable; parsing logic added in a later phase)
+// ============================================================================
+
+model ImportJob {
+  id               String                @id @default(cuid())
+  type             ImportJobType         @default(PRODUCT)
+  sourceFormat     ImportJobSourceFormat
+  originalFilename String
+  storageKey       String? // object-storage key of the uploaded file
+  fileHash         String? // sha-256 of the file, for idempotency / dedupe
+  status           ImportJobStatus       @default(PENDING)
+  mode             String? // "create" | "update" | "upsert"
+  totalRows        Int                   @default(0)
+  processedRows    Int                   @default(0)
+  createdRows      Int                   @default(0)
+  updatedRows      Int                   @default(0)
+  skippedRows      Int                   @default(0)
+  failedRows       Int                   @default(0)
+  errorSummary     String?
+  createdById      String?
+  startedAt        DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  createdBy User?          @relation("ImportJobCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  rows      ImportJobRow[]
+
+  @@index([status])
+  @@index([type])
+  @@index([fileHash])
+  @@index([createdById])
+  @@index([createdAt])
+}
+
+model ImportJobRow {
+  id          String          @id @default(cuid())
+  importJobId String
+  rowNumber   Int
+  sku         String?
+  action      String? // "create" | "update" | "skip" | "error"
+  status      ImportRowStatus @default(PENDING)
+  errors      Json? // [{ column, code, message, value }]
+  rawData     Json? // original row as parsed
+  createdAt   DateTime        @default(now())
+
+  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+
+  @@unique([importJobId, rowNumber])
+  @@index([importJobId])
+  @@index([sku])
+}

@@ -47,28 +47,54 @@ the importer itself.
 
 ---
 
-## Phase 2 — Database & domain primitives ⬜
+## Phase 2 — Database foundation (Prisma) ✅ _(signed off 2026-09-03)_
 
-**Goal:** persistence layer and money/enum primitives, no UI.
+**Goal:** production-ready PostgreSQL schema + Prisma wiring. No UI, no features.
 
-**Scope**
+**Scope (delivered)**
 
-- Add Prisma; `prisma/schema.prisma` with Identity, Catalogue, Inventory models
-  (Commerce + Operations models stubbed or included but unused).
-- Prisma client singleton in `src/server/db/client.ts`; first repositories
-  (`categories`, `brands`, `products`, `variants`, `inventory`).
-- `Money` value object; attribute enumerations in `src/server/domain`.
-- Seed script with **synthetic** data only.
-- Integration tests against the docker Postgres.
-- Make `DATABASE_URL` required in `env.ts`.
+- `prisma` 6.19.x + `@prisma/client`; `prisma.config.ts` (loads `.env`).
+- `prisma/schema.prisma` — 29 models, 19 enums covering identity, catalogue
+  (normalised options), inventory ledger, cart, orders with historical
+  snapshots, payments, operator-configurable tax & shipping, discounts, and
+  import-job tracking.
+- Integer-cents money everywhere; `Currency` enum default `CAD`; `Decimal` only
+  for tax/discount rates.
+- `src/server/db/client.ts` — hot-reload-safe singleton client.
+- `src/server/domain/money.ts` — cents parse / arithmetic / format helper.
+- Initial migration `prisma/migrations/20260903000000_init/`.
+- Idempotent synthetic seed (`prisma/seed.ts`): categories, one brand, one demo
+  product with Size/Colour options + 4 variants + inventory + opening
+  movements, example ON tax region/rate, example shipping zone/method. No
+  customers, no secrets.
+- `DATABASE_URL` now **required** in `src/server/config/env.ts`.
+- Schema-invariant + money unit tests.
 
 **Acceptance criteria**
 
-- [ ] `prisma migrate dev` creates the schema from scratch; `prisma migrate deploy` works on a clean DB.
-- [ ] Repository unit/integration tests pass against a real Postgres in CI.
-- [ ] `Money` arithmetic/formatting covered by unit tests (rounding, CAD formatting).
-- [ ] Seed script populates and is idempotent; contains no real data.
-- [ ] Full verification pipeline green.
+- [x] `prisma validate` passes; `prisma generate` produces the client.
+- [x] `tsc`, ESLint, Prettier, `next build`, and all Phase 1 tests stay green.
+- [x] Schema-invariant tests: integer cents on every money field, critical
+      `@unique` constraints present, cuid ids, timestamp conventions.
+- [x] `money.ts` arithmetic/formatting covered by unit tests.
+- [x] Seed script is written, idempotent by construction, and reaches the DB
+      layer (verified up to the connection boundary); contains no real data.
+- [x] Initial migration generated offline (`prisma migrate diff --from-empty`)
+      and verified deterministic (byte-identical on regeneration).
+
+**CTO sign-off note (2026-09-03):** Phase 2 approved. Docker/PostgreSQL was not
+available in any authoring environment, so the following were **not executed**
+and are carried as a **Phase 3 pre-flight task** (run once, before Phase 3 code):
+
+```
+docker compose up -d
+npm run db:deploy      # apply 20260903000000_init to a clean DB
+npm run db:seed        # load synthetic data
+npm run db:deploy && npm run db:seed   # confirm both are idempotent
+```
+
+Repository/integration tests against a live Postgres also land at the start of
+Phase 3 (alongside the auth work), not retroactively in Phase 2.
 
 ---
 

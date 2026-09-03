@@ -18,9 +18,12 @@ const nodeEnv = z.enum(["development", "test", "production"]).default("developme
 const serverSchema = z.object({
   NODE_ENV: nodeEnv,
 
-  // Database (PostgreSQL) - required from the persistence phase onward.
-  DATABASE_URL: z.url().optional(),
+  // Database (PostgreSQL). Required from Phase 2 (persistence) onward.
+  DATABASE_URL: z.url({ error: "DATABASE_URL is required (a PostgreSQL connection string)." }),
+  // Optional non-pooled connection for migrations / introspection.
   DIRECT_DATABASE_URL: z.url().optional(),
+  // Optional shadow database for `prisma migrate dev` on hosts that need one.
+  SHADOW_DATABASE_URL: z.url().optional(),
 
   // Authentication (Auth.js).
   AUTH_SECRET: z.string().min(16).optional(),
