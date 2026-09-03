@@ -17,7 +17,15 @@ import { SESSION_COOKIE_NAME } from "@/server/auth/config";
 const PROTECTED_PREFIXES = ["/admin"];
 
 function buildCsp(nonce: string, isDev: boolean): string {
-  const scriptSrc = ["'self'", `'nonce-${nonce}'`, "'strict-dynamic'", isDev ? "'unsafe-eval'" : ""]
+  const scriptSrc = [
+    "'self'",
+    `'nonce-${nonce}'`,
+    "'strict-dynamic'",
+    // Host allow-lists are ignored by browsers that honour 'strict-dynamic';
+    // kept for older browsers that load Stripe.js by URL.
+    "https://js.stripe.com",
+    isDev ? "'unsafe-eval'" : "",
+  ]
     .filter(Boolean)
     .join(" ");
 
@@ -26,9 +34,12 @@ function buildCsp(nonce: string, isDev: boolean): string {
     `script-src ${scriptSrc}`,
     // TODO(phase 4): tighten to nonce/hash once the component system is settled.
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob:",
+    "img-src 'self' data: blob: https://*.stripe.com",
     "font-src 'self'",
-    "connect-src 'self'",
+    // Stripe.js / Payment Element talk to api.stripe.com and load an iframe
+    // from js.stripe.com + hooks.stripe.com (Phase 7).
+    "connect-src 'self' https://api.stripe.com",
+    "frame-src https://js.stripe.com https://hooks.stripe.com",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",

@@ -1,9 +1,9 @@
 # Taek Shops — Architecture
 
-> Status: **Phases 1–6 implemented** (foundation, database, auth/RBAC/audit,
-> catalogue + CSV import, inventory hardening, cart & checkout). This document is
-> the design of record. Where a section describes something not yet built, it is
-> marked _Planned_ or dated to a later phase. Nothing here commits the project to legal, tax, or shipping rules
+> Status: **Phases 1–7 implemented** (foundation, database, auth/RBAC/audit,
+> catalogue + CSV import, inventory hardening, cart & checkout, Stripe payments).
+> This document is the design of record. Where a section describes something not
+> yet built, it is marked _Planned_ or dated to a later phase. Nothing here commits the project to legal, tax, or shipping rules
 > — those are operator data behind interfaces (see §11, §12).
 > Security specifics: [`docs/security.md`](security.md).
 > Catalogue / inventory / import specifics: [`docs/catalog.md`](catalog.md).
@@ -48,13 +48,14 @@ Browser │  Storefront (RSC)      Admin (RSC, auth-gated)      Route Handlers /
 | Storefront         | `src/app/(storefront)/`                           | Product grid + page, cart, checkout, order confirmation               |
 | Cart               | `src/server/cart/`                                | Guest/customer carts; server-recomputed line prices                   |
 | Tax / Shipping     | `src/server/tax/`, `src/server/shipping/`         | `TaxCalculator` / `ShippingRateProvider` over operator data           |
+| Payments           | `src/server/domain/payments/`                     | `PaymentGateway` interface + Stripe impl; webhook completion          |
 | Administration     | `src/app/admin/`                                  | Auth-gated dashboard: products, variants, inventory, orders, imports  |
 | Authentication     | `src/server/auth/`                                | Credentials auth, DB sessions, RBAC guards, password/token handling   |
 | Audit              | `src/server/audit/`                               | Generic append-only audit log + metadata sanitisation                 |
 | User management    | `src/server/users/`                               | Admin list / inspect / role / status operations (server-enforced)     |
 | Catalogue          | `src/server/catalog/`                             | Brand/category/product/variant/option/image services + public queries |
 | Inventory          | `src/server/inventory/`                           | Row-locked stock transactions, reconcilable ledger, invariant check   |
-| Orders             | `src/server/orders/`                              | Checkout (cart → pending order) + order-lifecycle inventory wiring    |
+| Orders             | `src/server/orders/`                              | Checkout, payment orchestration, order-lifecycle inventory wiring     |
 | Domain logic       | `src/server/domain/`                              | Integer-cents money helper (`money.ts`)                               |
 | Database access    | `src/server/db/`                                  | Prisma client + repositories; only module that touches the DB         |
 | Validation schemas | `src/lib/validation/`                             | Shared Zod schemas + inferred types                                   |
@@ -365,14 +366,32 @@ Cart ─▶ Address & shipping method ─▶ Tax + shipping quote ─▶ Review
 
 ## 10. Payment boundary
 
-- Interface `PaymentGateway` in the domain layer:
-  `createPaymentIntent`, `confirmFromWebhook`, `refund`, `verifyWebhookSignature`.
-- **Stripe** is the first implementation (`src/server/domain/payments/stripe.ts`).
-- **No card data touches our servers or database.** The browser talks to Stripe
-  via Stripe.js / Payment Element; we store only the PaymentIntent id, status,
-  amount, and last-4/brand returned by Stripe.
-- Webhook endpoint verifies signatures with `STRIPE_WEBHOOK_SECRET`; unverified
-  events are rejected and logged.
+> **Phase 7 status: implemented.** Interface in
+> `src/server/domain/payments/payment-gateway.ts`, Stripe impl in
+> `.../stripe.ts`, orchestration in `src/server/orders/payment-service.ts`,
+> webhook at `src/app/api/webhooks/stripe/route.ts`.
+
+- Interface `PaymentGateway`: `createPaymentIntent`, `retrievePaymentIntent`,
+  `parseWebhook` (signature verification), `refund` (passthrough; the order/
+  inventory effects of a refund are Phase 8).
+- **Stripe** is the first implementation. `getPaymentGateway()` is the swap point.
+- **No card data touches our servers or database.** The browser confirms the
+  PaymentIntent directly with Stripe via the Payment Element; we store only the
+  PaymentIntent id, status, amount, and the non-sensitive card brand + last4.
+- **Charge amount is authoritative, never client-supplied** — it is always
+  `Order.totalCents`, frozen at checkout. Every finalize re-verifies
+  `intent.amount` and currency against the order.
+- **Duplicate charge prevented** — one `Payment` per order
+  (`@@unique([orderId])`) + a per-order Stripe idempotency key.
+- **Authoritative completion is server-side only** — `payment_intent.succeeded`
+  from the signature-verified webhook (or a server-side `retrievePaymentIntent`
+  on the return page). A browser `redirect_status` is never trusted.
+- **Webhook**: verifies signatures with `STRIPE_WEBHOOK_SECRET` (invalid → 400,
+  nothing written); de-dupes on `WebhookEvent.eventId` (unique, written inside
+  the processing transaction) so replays / duplicates / concurrent deliveries
+  are no-ops; order-state guards absorb out-of-order events without a duplicate
+  stock/ledger effect or an invalid transition. success → `paid` + commit stock;
+  failure/cancel → `cancelled` + release stock.
 - All secret keys are server-only env vars; only
   `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` reaches the client.
 

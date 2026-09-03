@@ -137,7 +137,8 @@ export async function placeOrderAction(
 
   if (result.ok && orderNumber) {
     revalidatePath("/", "layout");
-    redirect(`/checkout/confirmation/${orderNumber}`);
+    // Phase 7: the order is created PENDING/UNPAID — take payment next.
+    redirect(`/checkout/${orderNumber}/payment`);
   }
   return result;
 }

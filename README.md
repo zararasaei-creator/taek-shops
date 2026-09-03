@@ -4,14 +4,15 @@ A secure, maintainable, responsive, multilingual-ready **Canadian e-commerce
 platform** for taekwondo uniforms, belts, protective gear, training equipment,
 and accessories.
 
-> **Project status: Phases 1–5 complete; Phase 6 (cart & checkout) awaiting CTO
+> **Project status: Phases 1–6 complete; Phase 7 (Stripe payments) awaiting CTO
 > review.** The toolchain, Prisma/PostgreSQL schema, auth/RBAC/audit, the product
-> catalogue + CSV importer, the hardened inventory domain (row-locked
-> transactions, a reconcilable ledger, DB CHECK constraints, order-lifecycle
-> wiring), and now the storefront cart, configured tax/shipping calculators, and
-> checkout that creates a **pending** order with frozen totals and reserved
-> stock are in place and verified against a live PostgreSQL database. Real
-> payment (Stripe) is the next phase — see the roadmap.
+> catalogue + CSV importer, the hardened inventory domain, the storefront cart +
+> configured tax/shipping + checkout, and now **Stripe payments** — a
+> `PaymentGateway` interface, server-derived charge amounts, the Payment Element,
+> and a signature-verified, idempotent webhook that moves a paid order
+> `pending → paid` (commit stock) or a failed one `→ cancelled` (release stock) —
+> are in place and verified against a live PostgreSQL database. The browser
+> card-entry e2e needs a Stripe test account (see the roadmap).
 
 ## Documentation
 
@@ -60,8 +61,12 @@ cp .env.example .env   # then edit .env
 - Browser-exposed values must be prefixed `NEXT_PUBLIC_`. Everything else is
   server-only and never bundled for the client.
 - From Phase 2, `DATABASE_URL` is required. `AUTH_SECRET` (a ≥16-char pepper) is
-  optional but strongly recommended for Phase 3+. Stripe/storage vars remain
-  optional until their phase.
+  optional but strongly recommended for Phase 3+.
+- **Stripe (Phase 7):** set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and
+  `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` to **test-mode** values to enable the
+  payment step. Locally, run `stripe listen --forward-to localhost:3000/api/webhooks/stripe`
+  and use the secret it prints. Without these, checkout still creates the pending
+  order but payment is disabled.
 - **Development admin:** set `SEED_ADMIN_EMAIL` + `SEED_ADMIN_PASSWORD` in `.env`,
   then `npm run db:seed` creates one `ADMIN` user (password hashed, never
   printed). Dev/demo only — never set these in production.
@@ -166,7 +171,8 @@ src/
     inventory/           Row-locked stock transactions, reconcilable ledger, invariant check
     cart/                Guest/customer carts, server-recomputed line prices
     tax/  shipping/      TaxCalculator / ShippingRateProvider over operator-configured tables
-    orders/              Checkout (cart -> pending order) + order-lifecycle inventory wiring
+    domain/payments/     PaymentGateway interface + Stripe implementation
+    orders/              Checkout, payment orchestration, order-lifecycle inventory wiring
     storage/             ObjectStorage interface + local dev backend
     import/              CSV product import (parse -> validate -> preview -> commit)
     domain/money.ts      Integer-cents money helper

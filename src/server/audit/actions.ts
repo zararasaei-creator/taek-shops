@@ -54,6 +54,15 @@ export const AUDIT_ACTIONS = {
 
   // Checkout (Phase 6)
   ORDER_PLACED: "order.placed",
+
+  // Payments (Phase 7 — Stripe)
+  PAYMENT_INTENT_CREATED: "payment.intent.created",
+  PAYMENT_SUCCEEDED: "payment.succeeded",
+  PAYMENT_FAILED: "payment.failed",
+  PAYMENT_AMOUNT_MISMATCH: "payment.amount_mismatch",
+  PAYMENT_LATE_SUCCESS: "payment.late_success",
+  PAYMENT_WEBHOOK_UNHANDLED: "payment.webhook.unhandled",
+  PAYMENT_WEBHOOK_STALE: "payment.webhook.stale",
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

@@ -94,7 +94,7 @@ interface OrderLine {
   quantity: number;
 }
 
-interface OrderForInventory {
+export interface OrderForInventory {
   id: string;
   orderNumber: string;
   status: OrderStatus;
@@ -239,6 +239,53 @@ export interface OrderTransitionResult {
   inventoryEffect: OrderInventoryOp | null;
 }
 
+export interface OrderTransitionTxResult {
+  from: OrderStatus;
+  to: OrderStatus;
+  effect: OrderInventoryOp | null;
+  order: OrderForInventory;
+}
+
+/**
+ * The transaction body of a status transition: validate, apply the inventory
+ * effect, write the status + stamps. Assumes the caller already opened the
+ * transaction and authorized. Phase 7's payment webhook composes this with its
+ * own `Payment` / `WebhookEvent` writes so payment + stock move atomically.
+ */
+export async function applyOrderStatusTransitionTx(
+  tx: Tx,
+  orderId: string,
+  targetStatus: OrderStatus,
+): Promise<OrderTransitionTxResult> {
+  const order = await loadOrderForInventory(tx, orderId);
+  const from = order.status;
+
+  if (from === targetStatus) {
+    return { from, to: targetStatus, effect: null, order };
+  }
+  if (!canTransitionOrder(from, targetStatus)) {
+    throw new InvalidStateTransitionError(
+      `Order ${order.orderNumber} cannot move from ${from} to ${targetStatus}.`,
+    );
+  }
+
+  const effect = inventoryEffectForTransition(from, targetStatus);
+  if (effect) await applyOpToLines(tx, order, effect);
+
+  await tx.order.update({
+    where: { id: orderId },
+    data: {
+      status: targetStatus,
+      ...(targetStatus === OrderStatus.CONFIRMED && from === OrderStatus.PENDING
+        ? { placedAt: new Date() }
+        : {}),
+      ...(targetStatus === OrderStatus.CANCELLED ? { cancelledAt: new Date() } : {}),
+    },
+  });
+
+  return { from, to: targetStatus, effect, order };
+}
+
 /**
  * Move an order to `targetStatus`, applying the matching inventory operation and
  * the status write in one transaction. Rejects illegal transitions. Persists
@@ -253,35 +300,10 @@ export async function applyOrderStatusTransition(
 ): Promise<OrderTransitionResult> {
   const authed = requirePermission(actor, "order.write");
 
-  const result = await db.$transaction(async (tx) => {
-    const order = await loadOrderForInventory(tx, orderId);
-    const from = order.status;
-
-    if (from === targetStatus) {
-      return { from, to: targetStatus, effect: null as OrderInventoryOp | null, order };
-    }
-    if (!canTransitionOrder(from, targetStatus)) {
-      throw new InvalidStateTransitionError(
-        `Order ${order.orderNumber} cannot move from ${from} to ${targetStatus}.`,
-      );
-    }
-
-    const effect = inventoryEffectForTransition(from, targetStatus);
-    if (effect) await applyOpToLines(tx, order, effect);
-
-    await tx.order.update({
-      where: { id: orderId },
-      data: {
-        status: targetStatus,
-        ...(targetStatus === OrderStatus.CONFIRMED && from === OrderStatus.PENDING
-          ? { placedAt: new Date() }
-          : {}),
-        ...(targetStatus === OrderStatus.CANCELLED ? { cancelledAt: new Date() } : {}),
-      },
-    });
-
-    return { from, to: targetStatus, effect, order };
-  }, TX_OPTIONS);
+  const result = await db.$transaction(
+    (tx) => applyOrderStatusTransitionTx(tx, orderId, targetStatus),
+    TX_OPTIONS,
+  );
 
   await recordAudit(
     {

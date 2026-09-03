@@ -26,15 +26,28 @@ export default async function ConfirmationPage({
 
   const shipping = order.addresses.find((a) => a.type === "SHIPPING");
 
+  const paid = order.paymentStatus === "PAID";
+
   return (
     <Container className="py-12">
       <p className="text-sm text-green-700" data-testid="order-status">
         Order {order.status.toLowerCase()}
       </p>
-      <h1 className="mt-2 text-3xl font-semibold tracking-tight">Thank you for your order</h1>
+      <h1 className="mt-2 text-3xl font-semibold tracking-tight">
+        {paid ? "Thank you for your order" : "Your order"}
+      </h1>
       <p className="mt-2 text-zinc-600 dark:text-zinc-300">
-        Order number <strong data-testid="order-number">{order.orderNumber}</strong>. A payment step
-        will be added in a later release; your order is currently <strong>{order.status}</strong>.
+        Order number <strong data-testid="order-number">{order.orderNumber}</strong>. Status{" "}
+        <strong>{order.status}</strong>, payment{" "}
+        <strong data-testid="payment-status">{order.paymentStatus}</strong>.
+        {!paid && order.paymentStatus === "UNPAID" ? (
+          <>
+            {" "}
+            <Link href={`/checkout/${order.orderNumber}/payment`} className="text-blue-600">
+              Complete payment →
+            </Link>
+          </>
+        ) : null}
       </p>
 
       <div className="mt-8 grid gap-8 lg:grid-cols-2">

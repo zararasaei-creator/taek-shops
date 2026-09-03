@@ -613,21 +613,42 @@ model Payment {
   id                String                   @id @default(cuid())
   orderId           String
   provider          String // "stripe", "manual", ...
-  providerPaymentId String?
+  providerPaymentId String? // Stripe PaymentIntent id
   status            PaymentTransactionStatus @default(PENDING)
   amountCents       Int
   currency          Currency                 @default(CAD)
   refundedCents     Int                      @default(0)
   errorMessage      String?
+  // Non-sensitive display metadata only (card brand, last4). NEVER a PAN, CVV,
+  // or expiry — card data never touches this server (Phase 7).
   metadata          Json?
   createdAt         DateTime                 @default(now())
   updatedAt         DateTime                 @updatedAt
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
+  // One payment record per order — the application-level guard against a
+  // duplicate charge (Phase 7). Refunds (Phase 8) mutate this same row.
+  @@unique([orderId])
   @@unique([provider, providerPaymentId])
   @@index([orderId])
   @@index([status])
+}
+
+// Stripe webhook idempotency store (Phase 7). One row per delivered provider
+// event id; a redelivery / replay finds the row (unique `eventId`) and is a
+// no-op. The unique index is also the concurrency guard — two simultaneous
+// deliveries of the same event race on the insert and one rolls back.
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  provider    String    @default("stripe")
+  eventId     String    @unique // e.g. Stripe "evt_..."
+  type        String // e.g. "payment_intent.succeeded"
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+
+  @@index([type])
+  @@index([receivedAt])
 }
 
 // ============================================================================

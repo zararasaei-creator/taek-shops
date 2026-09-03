@@ -106,14 +106,18 @@ export function placeOrderInput(shippingMethodId: string, over?: Partial<Record<
   };
 }
 
-/** Remove Phase 6 carts + orders + their audit rows. Config rows are left in place. */
+/**
+ * Remove test carts + orders + every audit row tied to them (order.placed,
+ * order.status.changed, payment.*). Tax/shipping config rows are left in place.
+ */
 export async function cleanupCheckout(): Promise<void> {
   const orders = await db.order.findMany({
     where: { customerEmail: { contains: "phase6" } },
     select: { id: true },
   });
+  await db.auditLog.deleteMany({ where: { entityId: { in: orders.map((o) => o.id) } } });
   await db.auditLog.deleteMany({
-    where: { action: "order.placed", entityId: { in: orders.map((o) => o.id) } },
+    where: { action: { startsWith: "payment.webhook." } },
   });
   await db.order.deleteMany({ where: { customerEmail: { contains: "phase6" } } });
   await db.cart.deleteMany({ where: { token: { startsWith: TEST_CART_TOKEN_PREFIX } } });

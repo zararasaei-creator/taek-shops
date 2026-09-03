@@ -352,25 +352,72 @@ machine beyond `PENDING` → Phase 8; discount codes (`discountCents` stays 0).
 
 ---
 
-## Phase 7 — Payments (Stripe) ⬜
+## Phase 7 — Payments (Stripe) 🚧 _(awaiting CTO review, 2026-09-03)_
 
-**Scope**
+Design: [`docs/architecture.md`](architecture.md) §10,
+[`src/server/domain/payments/README.md`](../src/server/domain/payments/README.md).
 
-- `PaymentGateway` interface + Stripe implementation.
-- PaymentIntent creation with idempotency key; Stripe Payment Element on client.
-- Webhook handler (signature-verified, event-id de-duped): success → `paid` +
-  commit stock; failure/expiry → `cancelled` + release stock.
-- No card data stored.
+**Scope (delivered)**
+
+- **`PaymentGateway` interface** (`src/server/domain/payments/payment-gateway.ts`)
+  - **`StripePaymentGateway`** (`stripe.ts`): `createPaymentIntent` (always with a
+    per-request idempotency key), `retrievePaymentIntent`, `parseWebhook`
+    (signature-verified via `STRIPE_WEBHOOK_SECRET`), `refund` (passthrough; order
+    effects are Phase 8). Card data never crosses this boundary.
+- **`startPayment`** (`src/server/orders/payment-service.ts`) — creates/reuses
+  **one** `Payment` row + PaymentIntent per order (`Payment.@@unique([orderId])`
+  - Stripe `pi-create-<orderId>` idempotency key ⇒ no duplicate charge). The
+    amount is always `Order.totalCents` (frozen at checkout) — the client supplies
+    nothing.
+- **Stripe Payment Element** on the client
+  (`src/app/(storefront)/checkout/[orderNumber]/payment`), confirming with a
+  `return_url` back to `…/complete`.
+- **Webhook** `POST /api/webhooks/stripe` — invalid/missing signature → 400,
+  nothing written. Every event id recorded in `WebhookEvent` (unique `eventId`)
+  **inside** the processing transaction ⇒ redelivery / replay / duplicate is a
+  no-op and two concurrent deliveries race on the insert. `payment_intent.succeeded`
+  → `Payment CAPTURED`, `Order.paymentStatus PAID`, and `PENDING → CONFIRMED`
+  which **commits** the Phase 5 reservation (once). `payment_intent.payment_failed`
+  / `.canceled` → `Payment FAILED`, `Order.paymentStatus FAILED`, and
+  `PENDING → CANCELLED` which **releases** the reservation. Out-of-order events
+  are absorbed by order-state guards (no double commit, no invalid transition).
+- **Server-side completion only** — `…/complete` calls `verifyPaymentStatus`
+  which retrieves the intent from Stripe and runs the same idempotent finalize;
+  the browser's `redirect_status` is never trusted.
+- Amount/currency are re-verified against the frozen order on every finalize.
+- CSP updated for Stripe.js (`connect-src api.stripe.com`, `frame-src
+js.stripe.com hooks.stripe.com`). Additive migration
+  `20260907000000_phase7_payments` (`WebhookEvent` + `Payment.@@unique([orderId])`).
 
 **Acceptance criteria**
 
-- [ ] Stripe test-mode payment moves an order `pending → paid` and commits stock.
-- [ ] Failed payment releases reserved stock.
-- [ ] Webhook replay / duplicate event is a no-op (test).
-- [ ] Unsigned webhook rejected (test).
-- [ ] No PAN/CVV/expiry persisted anywhere (code + schema review documented).
-- [ ] e2e checkout with Stripe test card passes in CI.
-- [ ] Full verification pipeline green.
+- [x] Stripe test-mode payment moves an order `pending → paid` and commits stock
+      — server layer verified end-to-end
+      (`tests/integration/payments.integration.test.ts`: signed
+      `payment_intent.succeeded` through the real webhook route → order
+      CONFIRMED/PAID, one SALE movement, ledger reconciles). **The browser
+      card-entry leg needs a Stripe test account — see "external verification".**
+- [x] Failed payment releases reserved stock — integration test:
+      `payment_intent.payment_failed` → order CANCELLED/FAILED, reservation
+      released, ledger reconciles.
+- [x] Webhook replay / duplicate event is a no-op — integration test: 3×
+      redelivery + 3× concurrent delivery → exactly one SALE movement, on-hand
+      unchanged after the first.
+- [x] Unsigned / badly-signed / tampered webhook rejected — unit
+      (`stripe-webhook-signature.test.ts`, real crypto) + integration + e2e.
+- [x] No PAN/CVV/expiry persisted anywhere — the `Payment.metadata` stores only
+      card brand + last4; card data is entered into Stripe's iframe and never
+      posted to this server (code + schema review in the Phase 7 report).
+- [ ] **e2e checkout with Stripe test card passes in CI** — blocked: needs a
+      Stripe TEST account, test keys as CI secrets, and `stripe listen` webhook
+      forwarding. The checkout → payment routing and the webhook signature gate
+      are verified locally (`checkout.spec.ts`, `payment.spec.ts`).
+- [x] `lint`, `typecheck`, **230** unit, **45** integration, `next build`,
+      **18** e2e (+1 seed-gated) — all green.
+
+**Deferred unchanged:** refund orchestration + order state machine (Phase 8);
+retry of a declined card on the same order (a failed payment cancels the order,
+per the roadmap "failure → cancelled + release").
 
 ---
 

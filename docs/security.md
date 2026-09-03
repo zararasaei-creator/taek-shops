@@ -148,11 +148,39 @@ Set for every response (static ones in `next.config.ts`, dynamic in `src/proxy.t
 
 - **`style-src 'unsafe-inline'`** — Tailwind v4 + framework style injection.
   Tighten to nonce/hash once the Phase 4 component system stabilises.
-- **`connect-src` / `img-src` / `frame-src` for third parties** — Stripe.js,
-  the S3/CDN image host, and any analytics are unknown until Phase 7/9. Their
-  origins get added then.
+- **Stripe (Phase 7, added):** `connect-src https://api.stripe.com`,
+  `frame-src https://js.stripe.com https://hooks.stripe.com`,
+  `img-src … https://*.stripe.com`, `script-src … https://js.stripe.com`.
+- **`connect-src` / `img-src` / `frame-src` for other third parties** — the
+  S3/CDN image host and any analytics are unknown until Phase 9. Their origins
+  get added then.
 - **`report-uri` / `report-to`** — no CSP reporting endpoint yet.
 - **Nonced `<Script>` for future inline scripts** — none exist today.
+
+## 9a. Payments (Phase 7)
+
+- **No card data on our servers or in the database.** The card is entered into
+  Stripe's Payment Element (an iframe from `js.stripe.com`) and confirmed
+  directly with Stripe. We persist only the PaymentIntent id, its status, the
+  amount, and the non-sensitive card brand + last4.
+- **Charge amount is server-derived** from the frozen `Order.totalCents`; the
+  client never sends an amount, tax, shipping, discount, currency, or total.
+  Every payment finalize re-verifies `intent.amount` + currency against the
+  order and refuses on mismatch (`payment.amount_mismatch` audit).
+- **Duplicate charge is impossible** — one `Payment` per order
+  (`@@unique([orderId])`) plus a per-order Stripe request idempotency key.
+- **Completion is authoritative server-side only.** A browser redirect
+  (`redirect_status`) is never trusted; the order is marked paid only by the
+  signature-verified webhook or a server-side `retrievePaymentIntent`.
+- **Webhook**: `stripe.webhooks.constructEvent` with `STRIPE_WEBHOOK_SECRET`;
+  an invalid/missing signature → `400`, nothing written. Every event id is
+  recorded in `WebhookEvent` (unique `eventId`) inside the processing
+  transaction, so replays / duplicates / concurrent deliveries are no-ops and
+  cannot cause a second stock deduction or ledger movement. Out-of-order events
+  are absorbed by the order-state machine (no invalid transition).
+- Stripe secret keys are server-only env vars; only
+  `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` reaches the client. Payments are disabled
+  unless both `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` are set.
 
 ## 10. Known limitations / technical debt
 

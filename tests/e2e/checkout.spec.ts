@@ -43,14 +43,19 @@ test("a shopper can browse, add to cart, check out, and reach a pending order", 
   await expect(page.getByTestId("review-tax")).toHaveText("$6.50"); // 13% of $50
   await expect(page.getByTestId("review-total")).toHaveText("$68.50");
 
-  // 5. Place the order
+  // 5. Place the order — creates the PENDING/UNPAID order and moves to payment
   await page.getByRole("button", { name: "Place order" }).click();
 
-  // 6. Confirmation — pending order with a number
-  await expect(page).toHaveURL(/\/checkout\/confirmation\/TS-/);
-  await expect(page.getByTestId("order-status")).toHaveText(/pending/i);
-  const orderNumber = await page.getByTestId("order-number").textContent();
+  // 6. Payment step (Phase 7)
+  await expect(page).toHaveURL(/\/checkout\/TS-\d{8}-[0-9A-Z]{6}\/payment$/);
+  const orderNumber = new URL(page.url()).pathname.split("/")[2]!;
   expect(orderNumber).toMatch(/^TS-\d{8}-[0-9A-Z]{6}$/);
+
+  // The order exists in a pending, unpaid state (Phase 6 acceptance).
+  await page.goto(`/checkout/confirmation/${orderNumber}`);
+  await expect(page.getByTestId("order-status")).toHaveText(/pending/i);
+  await expect(page.getByTestId("payment-status")).toHaveText("UNPAID");
+  await expect(page.getByTestId("order-number")).toHaveText(orderNumber);
 
   // cart is emptied
   await page.goto("/cart");
