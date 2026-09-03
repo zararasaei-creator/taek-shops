@@ -6,9 +6,10 @@ phase may be marked complete on the basis of scaffolding alone.
 
 **Verification pipeline** (run for every phase):
 `npm ci` → `npm run format:check` → `npm run lint` → `npm run typecheck` →
-`npm run test` → `npm run build`. Add `npm run test:e2e` from Phase 3 on, and
-`npm run test:integration` from Phase 5 on (needs `docker compose up -d` +
-`npm run db:deploy`).
+`npm run test` → `npm run build`. Add `npm run test:e2e` from Phase 3 on and
+`npm run test:integration` from Phase 5 on. From Phase 5, `test:integration`
+needs a database; from Phase 6, `test:e2e` does too (the storefront reads it) —
+`docker compose up -d && npm run db:deploy && npm run db:seed` first.
 
 Legend: ✅ Complete · 🚧 In progress / awaiting review · ⬜ Not started
 
@@ -294,24 +295,60 @@ flow (Phases 6–8); the `onHand` reconciliation as a scheduled job.
 
 ---
 
-## Phase 6 — Cart & checkout (no real payment) ⬜
+## Phase 6 — Cart & checkout (no real payment) 🚧 _(awaiting CTO review, 2026-09-03)_
 
-**Scope**
+Design: [`docs/architecture.md`](architecture.md) §9–§12,
+[`src/server/orders/README.md`](../src/server/orders/README.md).
 
-- Cart (guest + customer), server-recomputed totals.
-- Checkout: address entry, shipping method selection, order review.
-- `TaxCalculator` + `ShippingRateProvider` interfaces with
-  operator-configured implementations (rates/rules entered via admin, stored in
-  DB — none committed to source).
-- Order creation transaction: create `Order`, reserve stock, freeze totals.
+**Scope (delivered)**
+
+- **Cart** (`src/server/cart/`) — guest (opaque `taek_cart` cookie token) +
+  customer; one `ACTIVE` cart per token. `getCartSummary` recomputes every line
+  from the current `ProductVariant.priceCents` and drops no-longer-sellable
+  lines. Quantity clamped to 99.
+- **Tax** (`src/server/tax/`) — `TaxCalculator` interface +
+  `ConfiguredRateTaxCalculator` reading `TaxRegion`/`TaxRate` (province match →
+  country-wide fallback; `taxCategory` filter; `priority`; `compound`;
+  effective-date window). `taxCents = round(taxableCents * rate)`.
+- **Shipping** (`src/server/shipping/`) — `ShippingRateProvider` interface +
+  `FlatRateShippingProvider` reading `ShippingZone`/`ShippingZoneRegion`/
+  `ShippingMethod`, with `freeShippingThresholdCents`.
+- **Checkout** (`src/server/orders/checkout-service.ts`) — `quoteCheckout`
+  (read-only review) + `placeOrder`: one transaction that recomputes all
+  amounts server-side, creates the `Order` (`PENDING`/`UNPAID`) + `OrderItem`
+  snapshots + `OrderAddress` (shipping & billing) with frozen totals, reserves
+  stock via the Phase 5 `reserveStockTx`, and converts the cart. Idempotent on
+  `Order.cartId`.
+- **Storefront** (`src/app/(storefront)/`) — product grid, product page with
+  add-to-cart, cart page, checkout page (address + shipping + live review),
+  order-confirmation page. The minimum surface to exercise cart → checkout; full
+  catalogue browsing / faceting is still later work.
+- Audit action `order.placed`. **No schema change** — the Phase 2 models
+  (`Cart`, `Order`, `TaxRegion`, `ShippingMethod`, …) already cover it.
+
+**Out of scope (deferred, unchanged):** real payment / Stripe → Phase 7; the
+tax & shipping **configuration admin UI** → Phase 11 (Phase 6 consumes the
+tables + seed example rows); order management / customer order history / status
+machine beyond `PENDING` → Phase 8; discount codes (`discountCents` stays 0).
 
 **Acceptance criteria**
 
-- [ ] Client cannot alter prices/totals (server recompute test).
-- [ ] Tax and shipping are quoted from configured data and frozen onto the order.
-- [ ] Order creation + stock reservation is atomic (integration test).
-- [ ] e2e: cart → checkout → order in `pending` state.
-- [ ] Full verification pipeline green.
+- [x] Client cannot alter prices/totals — the input schema has no money fields,
+      hostile extras are stripped, and `placeOrder` recomputes every amount from
+      the catalogue + config (unit `checkout-service` + integration
+      `checkout` "ignores any client-supplied money fields").
+- [x] Tax and shipping are quoted from configured data and frozen onto the order
+      — integration test asserts `order.taxCents` (13% HST), `order.shippingCents`
+      ($12 flat / $0 over the free-shipping threshold), and the per-line
+      `lineTaxCents` against the seeded ON/HST + Canada/Standard rows.
+- [x] Order creation + stock reservation is atomic — integration test: an
+      under-stocked line places **no** order, reserves **nothing**, leaves the
+      cart `ACTIVE`; a concurrent race for the last units yields exactly one
+      order and never oversells.
+- [x] e2e: cart → checkout → order in `pending` state
+      (`tests/e2e/checkout.spec.ts`, live PostgreSQL via `global-setup.ts`).
+- [x] `lint`, `typecheck`, **211** unit, **36** integration, `next build`,
+      **16** e2e (+1 seed-gated), all green.
 
 ---
 

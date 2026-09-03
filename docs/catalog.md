@@ -3,8 +3,9 @@
 > Status: **Phases 4–5 implemented.** Product catalogue, variants/options, admin
 > management UI, image-storage abstraction, the CSV import foundation, and the
 > hardened inventory domain (row-locked transactions, reconcilable two-column
-> ledger, DB CHECK constraints, order-lifecycle wiring). Cart, checkout, orders,
-> and payments are later phases.
+> ledger, DB CHECK constraints, order-lifecycle wiring). Cart & checkout (Phase 6)
+> are in `src/server/cart` + `src/server/orders/checkout-service.ts`; payments
+> and order management are later phases.
 
 ## 1. Catalogue architecture
 

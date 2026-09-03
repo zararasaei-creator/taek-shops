@@ -51,6 +51,9 @@ export const AUDIT_ACTIONS = {
 
   // Orders (Phase 5 — inventory lifecycle wiring)
   ORDER_STATUS_CHANGED: "order.status.changed",
+
+  // Checkout (Phase 6)
+  ORDER_PLACED: "order.placed",
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

@@ -1,9 +1,35 @@
 # Orders (`src/server/orders`)
 
-Phase 5 delivers only the **inventory wiring** for the order lifecycle. Order
-_creation_ (from a cart, with totals / addresses / order numbers) is Phase 6; the
-full order state machine (payment, fulfilment, refunds) is Phase 8. This module
-is what those phases call to keep stock correct.
+- **Phase 5** — `order-inventory.ts`: the inventory wiring for the order
+  lifecycle (below).
+- **Phase 6** — `checkout-service.ts`: turn a cart into a `PENDING` order.
+- The full order state machine (payment, fulfilment, refunds) is Phase 8.
+
+## Checkout (`checkout-service.ts`, Phase 6)
+
+`quoteCheckout(identity, { province, shippingMethodId })` — a read-only,
+server-recomputed quote for the review step (subtotal, shipping options, tax,
+total). No writes.
+
+`placeOrder(identity, input, meta)` — **one transaction**:
+
+1. recompute every line price from the current catalogue, shipping from the
+   configured `ShippingMethod`, and tax from the configured `TaxRegion`/`TaxRate`
+   (`src/server/tax`, `src/server/shipping`) — **the client cannot influence any
+   amount**;
+2. create the `Order` (`PENDING` / `UNPAID`) + `OrderItem` snapshots +
+   `OrderAddress` (shipping & billing), freezing `subtotalCents`,
+   `shippingCents`, `taxCents`, `totalCents`;
+3. reserve stock for every line via `reserveStockTx` (Phase 5 — row-locked,
+   deterministic lock order), so an under-stocked line rolls the whole order
+   back;
+4. set `Cart.status = CONVERTED`; emit `order.placed`.
+
+Idempotent on the cart (`Order.cartId` is unique): replaying `placeOrder`
+returns the order already placed and reserves stock once. Payment is Phase 7 —
+the order stays `PENDING`.
+
+## Inventory wiring (`order-inventory.ts`, Phase 5)
 
 ## `order-inventory.ts`
 

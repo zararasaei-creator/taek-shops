@@ -4,14 +4,14 @@ A secure, maintainable, responsive, multilingual-ready **Canadian e-commerce
 platform** for taekwondo uniforms, belts, protective gear, training equipment,
 and accessories.
 
-> **Project status: Phases 1–4 complete; Phase 5 (inventory hardening) awaiting
-> CTO review.** The toolchain, Prisma/PostgreSQL schema, auth/RBAC/audit, the
-> product catalogue domain, admin management UI (`/admin/catalog`), CSV product
-> importer, and the hardened inventory domain (row-locked transactions, a
-> two-column reconcilable ledger, DB CHECK constraints, and the
-> reserve/commit/release/restock order-lifecycle wiring) are in place and
-> verified against a live PostgreSQL database. Storefront pages, cart, checkout,
-> and payments are planned work — see the roadmap.
+> **Project status: Phases 1–5 complete; Phase 6 (cart & checkout) awaiting CTO
+> review.** The toolchain, Prisma/PostgreSQL schema, auth/RBAC/audit, the product
+> catalogue + CSV importer, the hardened inventory domain (row-locked
+> transactions, a reconcilable ledger, DB CHECK constraints, order-lifecycle
+> wiring), and now the storefront cart, configured tax/shipping calculators, and
+> checkout that creates a **pending** order with frozen totals and reserved
+> stock are in place and verified against a live PostgreSQL database. Real
+> payment (Stripe) is the next phase — see the roadmap.
 
 ## Documentation
 
@@ -119,12 +119,14 @@ See [architecture.md](docs/architecture.md) § "Database architecture" and
 | `npm run test`             | Vitest unit/component tests (mocked Prisma, single run)           |
 | `npm run test:watch`       | Vitest in watch mode                                              |
 | `npm run test:integration` | DB-backed integration tests (needs Docker Postgres + `db:deploy`) |
-| `npm run test:e2e`         | Playwright end-to-end tests (starts the dev server)               |
+| `npm run test:e2e`         | Playwright end-to-end tests (builds + starts the app)             |
 | `npm run test:e2e:ui`      | Playwright in UI mode                                             |
 
 > First e2e run only: `npx playwright install` to download browser binaries.
 >
-> `test:integration` needs a live database: `docker compose up -d && npm run db:deploy`.
+> `test:integration` **and** (from Phase 6) `test:e2e` need a live database —
+> the storefront reads it: `docker compose up -d && npm run db:deploy && npm run db:seed`.
+> The e2e run seeds/removes its own isolated checkout fixture.
 > The authenticated-flow e2e (`auth-session.spec.ts`) runs only when
 > `E2E_ADMIN_EMAIL` / `E2E_ADMIN_PASSWORD` are set to a seeded admin.
 
@@ -162,7 +164,9 @@ src/
     users/               Admin user-management services (server-enforced)
     catalog/             Brand/category/product/variant/option/image services + public queries
     inventory/           Row-locked stock transactions, reconcilable ledger, invariant check
-    orders/              Order-lifecycle → inventory wiring (reserve/commit/release/restock)
+    cart/                Guest/customer carts, server-recomputed line prices
+    tax/  shipping/      TaxCalculator / ShippingRateProvider over operator-configured tables
+    orders/              Checkout (cart -> pending order) + order-lifecycle inventory wiring
     storage/             ObjectStorage interface + local dev backend
     import/              CSV product import (parse -> validate -> preview -> commit)
     domain/money.ts      Integer-cents money helper

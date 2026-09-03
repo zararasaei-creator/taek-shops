@@ -1,7 +1,21 @@
 import Link from "next/link";
-import { Container } from "@/components/ui/container";
 
-export default function StorefrontLayout({ children }: LayoutProps<"/">) {
+import { Container } from "@/components/ui/container";
+import { cartIdentity } from "@/server/cart/identity";
+import { findActiveCart, getCartSummary } from "@/server/cart/cart-service";
+
+export const dynamic = "force-dynamic";
+
+async function cartItemCount(): Promise<number> {
+  const cart = await findActiveCart(await cartIdentity());
+  if (!cart) return 0;
+  const summary = await getCartSummary(cart.id, cart.token);
+  return summary.itemCount;
+}
+
+export default async function StorefrontLayout({ children }: LayoutProps<"/">) {
+  const count = await cartItemCount();
+
   return (
     <div className="flex min-h-full flex-col">
       <header className="border-b border-zinc-200 dark:border-zinc-800">
@@ -9,7 +23,9 @@ export default function StorefrontLayout({ children }: LayoutProps<"/">) {
           <Link href="/" className="text-lg font-semibold tracking-tight">
             Taek Shops
           </Link>
-          <span className="text-sm text-zinc-500">Canadian taekwondo outfitters</span>
+          <Link href="/cart" className="text-sm" data-testid="nav-cart">
+            Cart{count > 0 ? ` (${count})` : ""}
+          </Link>
         </Container>
       </header>
       <main id="main-content" className="flex-1">

@@ -14,6 +14,10 @@ const baseURL = `http://localhost:${PORT}`;
  */
 export default defineConfig({
   testDir: "./tests/e2e",
+  // Phase 6: the storefront reads the database, so the run seeds an isolated
+  // checkout fixture (and tears it down) — needs `docker compose up -d` +
+  // `npm run db:deploy` + `npm run db:seed`.
+  globalSetup: "./tests/e2e/global-setup.ts",
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 1,

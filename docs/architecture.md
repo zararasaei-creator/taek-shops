@@ -1,9 +1,9 @@
 # Taek Shops — Architecture
 
-> Status: **Phases 1–5 implemented** (foundation, database, auth/RBAC/audit,
-> catalogue + CSV import, inventory hardening). This document is the design of
-> record. Where a section describes something not yet built, it is marked
-> _Planned_ or dated to a later phase. Nothing here commits the project to legal, tax, or shipping rules
+> Status: **Phases 1–6 implemented** (foundation, database, auth/RBAC/audit,
+> catalogue + CSV import, inventory hardening, cart & checkout). This document is
+> the design of record. Where a section describes something not yet built, it is
+> marked _Planned_ or dated to a later phase. Nothing here commits the project to legal, tax, or shipping rules
 > — those are operator data behind interfaces (see §11, §12).
 > Security specifics: [`docs/security.md`](security.md).
 > Catalogue / inventory / import specifics: [`docs/catalog.md`](catalog.md).
@@ -45,15 +45,17 @@ Browser │  Storefront (RSC)      Admin (RSC, auth-gated)      Route Handlers /
 
 | Module             | Location                                          | Responsibility                                                        |
 | ------------------ | ------------------------------------------------- | --------------------------------------------------------------------- |
-| Storefront         | `src/app/(storefront)/`                           | Public catalogue, product pages, cart, checkout UI                    |
+| Storefront         | `src/app/(storefront)/`                           | Product grid + page, cart, checkout, order confirmation               |
+| Cart               | `src/server/cart/`                                | Guest/customer carts; server-recomputed line prices                   |
+| Tax / Shipping     | `src/server/tax/`, `src/server/shipping/`         | `TaxCalculator` / `ShippingRateProvider` over operator data           |
 | Administration     | `src/app/admin/`                                  | Auth-gated dashboard: products, variants, inventory, orders, imports  |
 | Authentication     | `src/server/auth/`                                | Credentials auth, DB sessions, RBAC guards, password/token handling   |
 | Audit              | `src/server/audit/`                               | Generic append-only audit log + metadata sanitisation                 |
 | User management    | `src/server/users/`                               | Admin list / inspect / role / status operations (server-enforced)     |
 | Catalogue          | `src/server/catalog/`                             | Brand/category/product/variant/option/image services + public queries |
 | Inventory          | `src/server/inventory/`                           | Row-locked stock transactions, reconcilable ledger, invariant check   |
-| Orders             | `src/server/orders/`                              | Order-lifecycle → inventory wiring (reserve/commit/release/restock)   |
-| Domain logic       | `src/server/domain/`                              | Pricing, tax/shipping orchestration (money helper today)              |
+| Orders             | `src/server/orders/`                              | Checkout (cart → pending order) + order-lifecycle inventory wiring    |
+| Domain logic       | `src/server/domain/`                              | Integer-cents money helper (`money.ts`)                               |
 | Database access    | `src/server/db/`                                  | Prisma client + repositories; only module that touches the DB         |
 | Validation schemas | `src/lib/validation/`                             | Shared Zod schemas + inferred types                                   |
 | Import processing  | `src/server/import/`                              | CSV/XLSX parse → map → validate → preview → commit → audit            |
@@ -332,21 +334,29 @@ and audit logging of every batch.
   re-stored in the bucket; the sheet is never trusted to point the storefront at
   an arbitrary external URL.
 
-## 9. Checkout & order flow _(Planned)_
+## 9. Checkout & order flow
+
+> **Phase 6 status: cart → checkout → pending order implemented**
+> (`src/server/cart/`, `src/server/tax/`, `src/server/shipping/`,
+> `src/server/orders/checkout-service.ts`, `src/app/(storefront)/`). The Stripe
+> steps below are Phase 7.
 
 ```
 Cart ─▶ Address & shipping method ─▶ Tax + shipping quote ─▶ Review
-     ─▶ Create Order (status=pending) + reserve stock (single txn)
-     ─▶ Create Stripe PaymentIntent ─▶ Client confirms payment
-     ─▶ Webhook: payment_intent.succeeded ─▶ Order status=paid, commit stock,
-        emit confirmation ─▶ Fulfilment
-     ─▶ Webhook failure / expiry ─▶ Order status=cancelled, release stock
+     ─▶ Create Order (status=pending) + reserve stock (single txn)      ← Phase 6
+     ─▶ Create Stripe PaymentIntent ─▶ Client confirms payment           ┐
+     ─▶ Webhook: payment_intent.succeeded ─▶ Order status=paid,          │ Phase 7
+        commit stock, emit confirmation ─▶ Fulfilment                    │
+     ─▶ Webhook failure / expiry ─▶ Order status=cancelled, release stock┘
 ```
 
-- **Order is authoritative, not the cart.** Totals are recomputed server-side at
-  order creation from current prices; the client cannot set prices.
-- **Idempotency:** order creation and webhook handling are idempotent
-  (idempotency key on PaymentIntent creation; event id de-dupe on webhooks).
+- **Order is authoritative, not the cart.** Every line price, the shipping
+  cost, and the tax are recomputed server-side in `placeOrder` from the current
+  catalogue and the configured `TaxRegion`/`TaxRate` + `ShippingMethod` rows,
+  then frozen onto the `Order` / `OrderItem`. The client sends only identifiers,
+  quantities, and the address.
+- **Idempotency:** order creation is idempotent on `Order.cartId` (unique);
+  webhook handling (Phase 7) de-dupes on event id.
 - **Guest checkout** supported; an account can be created post-purchase and linked
   by email.
 - **Order states:** `pending → paid → fulfilled → completed`, with
@@ -368,8 +378,9 @@ Cart ─▶ Address & shipping method ─▶ Tax + shipping quote ─▶ Review
 
 ## 11. Tax boundary
 
-- Interface `TaxCalculator`: `quote(lineItems, shipTo, taxCategories) → TaxBreakdown`
-  _(added in a later phase)_.
+- Interface `TaxCalculator`: `quote(lines, shipTo, at?) → TaxQuote`
+  (`src/server/tax/`, Phase 6). `ConfiguredRateTaxCalculator` reads the tables
+  below; a third-party adapter swaps in at `getTaxCalculator()`.
 - **The platform ships no tax rates.** Rates are operator data, held in
   `TaxRegion` (country + optional province, `@@unique([country, province])`) and
   `TaxRate` (`name`, exact `Decimal(9,6)` `rate`, optional `taxCategory`,
@@ -388,7 +399,8 @@ Cart ─▶ Address & shipping method ─▶ Tax + shipping quote ─▶ Review
 ## 12. Shipping boundary
 
 - Interface `ShippingRateProvider`: `rates(parcel, shipFrom, shipTo) → ShippingOption[]`
-  _(added in a later phase)_.
+  (`src/server/shipping/`, Phase 6). `FlatRateShippingProvider` reads the tables
+  below; a carrier-API adapter swaps in at `getShippingProvider()`.
 - **No shipping prices in code.** Operator data lives in `ShippingZone`,
   `ShippingZoneRegion` (country + optional province), and `ShippingMethod`
   (`flatRateCents`, optional `freeShippingThresholdCents`, delivery-day range,
