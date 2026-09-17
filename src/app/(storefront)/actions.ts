@@ -1,6 +1,5 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { ZodError } from "zod";
@@ -58,8 +57,6 @@ export async function addToCartAction(
     });
     await writeCartToken(summary.token);
   });
-  revalidatePath("/cart");
-  revalidatePath("/", "layout");
   return result;
 }
 
@@ -73,8 +70,6 @@ export async function updateCartAction(
       quantity: Number(str(form, "quantity") || "0"),
     });
   });
-  revalidatePath("/cart");
-  revalidatePath("/", "layout");
   return result;
 }
 
@@ -85,8 +80,6 @@ export async function removeFromCartAction(
   const result = await run(async () => {
     await removeCartItem(await cartIdentity(), str(form, "variantId"));
   });
-  revalidatePath("/cart");
-  revalidatePath("/", "layout");
   return result;
 }
 
@@ -136,7 +129,6 @@ export async function placeOrderAction(
   });
 
   if (result.ok && orderNumber) {
-    revalidatePath("/", "layout");
     // Phase 7: the order is created PENDING/UNPAID — take payment next.
     redirect(`/checkout/${orderNumber}/payment`);
   }
