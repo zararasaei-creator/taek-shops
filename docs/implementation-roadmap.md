@@ -4049,7 +4049,7 @@ unchanged**; no service was replaced, no mirror was published, nothing was uploa
 *Implications.* Licence AGPLv3 (built and run unmodified as a throwaway test dependency; not distributed).
 *Security:* the upstream project is archived, so **no further security fixes** — acceptable only for a disposable
 loopback test server with synthetic credentials, never for real data. A `go install` build reports a development
-version string. Every CI run now spends about 2 extra minutes compiling it (1 m 49 s measured with no cache).
+version string. Every CI run now spends extra minutes compiling it (1 m 49 s locally with no cache; about 4 minutes on the hosted runner — see hosted run #2).
 *Not changed:* the dev `docker-compose.yml` (and its comment calling `quay.io/minio/*` "the correct source") still
 reference the withdrawn images; they work here from the local cache and **will fail on a fresh machine or after a
 Docker prune** — decide separately whether dev should move to the same source build. Production uses cloud S3, not MinIO.
@@ -4058,8 +4058,23 @@ Docker prune** — decide separately whether dev should move to the same source 
 through the updated CI compose file the service reported healthy under the existing `mc ready local` check; on a clean
 copy with no `.env`, against disposable tmpfs Postgres + this MinIO on loopback with synthetic credentials,
 `product-images-minio.integration.test.ts` passed **10/10** and the unchanged guard printed "10 tests passed, 0 skipped".
-The full suite was not rerun. **Hosted run #2 has not happened yet** at the time of this entry; until it does, treat the
-hosted pipeline as unproven beyond typecheck, lint and unit tests.
+The full suite was not rerun locally for this fix.
+
+**Hosted run #2 — PASSED (2026-10-13; run 38485243728, commit `aa58ede`, manual dispatch, `ubuntu-24.04`, no
+re-run).** `scripts/ci/verify.sh` reported its own "PASSED in 641 s" (its wording says "local/script run"; this one
+was on the hosted runner) and the job took 10 m 51 s (~11 billed minutes of the included allowance; runs #1 and #2
+together ≈ 14 of 2,000; no payment method exists, so nothing can be billed). Read from the job log, on the hosted
+runner: install; Chromium OS packages (`CI_PLAYWRIGHT_DEPS=1`); typecheck; lint; **524/524 unit tests (62 files)**;
+the pinned MinIO build (~4 min on this runner, the slowest stage); disposable Postgres + MinIO healthy; migrations
+against the disposable test database; **290/290 integration tests (24 files) including the real-MinIO suite
+"10 tests passed, 0 skipped"** (guard unchanged); **40/40 e2e tests**; runner and migrate image builds; migrate target
+on a fresh database; runner booted and `/api/health` OK. This is the first hosted verification of the pipeline; it
+also passed every stage the earlier local clean-copy run passed (that run counted 494 unit / 273 integration / 40 e2e;
+the higher unit and integration counts here are consistent with tests added since, which was not separately checked).
+**Still not covered by any CI:** `format:check` (fails on 83 existing files), dependency audit, security-header
+scan, load tests, deployment and rollback; the hosted run uses synthetic credentials and fake payment/email only, so
+real Stripe/Resend behaviour remains unverified. Only the workflow's `workflow_dispatch` trigger exists (no automatic
+runs on push); `.github/workflows/verify.yml` is the only workflow.
 
 **Smallest next milestone was: database backup and a verified restore drill — implemented (see next sub-milestone).**
 

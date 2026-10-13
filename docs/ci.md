@@ -40,7 +40,7 @@ gate runs with none.
 - **MinIO is built from source in CI.** MinIO no longer publishes community images (`quay.io/minio/*`
   refuses anonymous pulls, `dl.min.io` binaries are gone). `ci/minio/Dockerfile` builds the server and
   `mc` from the official source at pinned tags, on digest-pinned official base images; `verify.sh`
-  builds it first (about 2 extra minutes). The upstream project is archived, so this is for a
+  builds it first (about 4 extra minutes on the hosted runner). The upstream project is archived, so this is for a
   disposable loopback test server with synthetic credentials only. The dev `docker-compose.yml` still
   references the withdrawn images (they work only from the local cache).
 
@@ -63,7 +63,9 @@ See the "CI verification" entry in `docs/implementation-roadmap.md` (Phase 13): 
 exercised locally on a clean copy of the repository. The GitHub workflow was validated locally
 (YAML parse and structural checks only). **Hosted run #1 (2026-10-13) failed:** typecheck, lint and
 the 524 unit tests passed on the hosted runner; starting the services failed on the withdrawn MinIO
-image; integration, e2e and the application/image builds were not executed. See the roadmap entry
+image; integration, e2e and the application/image builds were not executed. **Hosted run #2
+(2026-10-13, after the MinIO fix) passed end to end** — 524 unit, 290 integration (real MinIO: 10, 0
+skipped), 40 e2e, both image builds and the image smoke — in about 11 minutes. See the roadmap entry
 "First hosted CI run and the MinIO image blocker". **Hosted results are recorded in the roadmap and
 are separate from the earlier local evidence.** The workflow is `workflow_dispatch` only
 (no push/PR trigger), has `contents: read`, no secrets, no artifacts, a 45-minute job timeout, and a
