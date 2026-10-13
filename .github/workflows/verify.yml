@@ -1,0 +1,48 @@
+# Pre-release verification on a GitHub-hosted runner. See docs/ci.md.
+#
+# Manual only (workflow_dispatch): nothing runs on push or pull request.
+# Read-only repository access; no secrets; no deployment, registry publishing or
+# artifact upload. scripts/ci/verify.sh generates its own synthetic credentials
+# per run and starts its own disposable PostgreSQL + MinIO with Docker Compose.
+name: Pre-release verification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time for this workflow; an extra manual trigger queues instead of
+# running in parallel (and never cancels a run that is already in progress).
+concurrency:
+  group: pre-release-verification
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify.sh
+    runs-on: ubuntu-24.04
+    # Hard ceiling on billed minutes for one run (the script also bounds each step).
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository (no credentials kept)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js (version from .nvmrc)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Show tool versions
+        run: |
+          node --version
+          npm --version
+          docker --version
+          docker compose version
+
+      - name: Run the verification pipeline
+        env:
+          CI_PLAYWRIGHT_DEPS: "1"
+        run: bash scripts/ci/verify.sh

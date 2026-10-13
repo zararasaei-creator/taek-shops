@@ -1,8 +1,8 @@
 # Pre-release verification (CI)
 
-Host-neutral. The repository has **no git remote and no CI host configured**, so no
-platform-specific workflow file exists yet (see [Activation](#activation)). All pipeline logic
-lives in one script that any host's job can run:
+Host-neutral. All pipeline logic lives in one script that any host's job can run. A minimal,
+**manual-only** GitHub Actions wrapper exists at `.github/workflows/verify.yml` (see
+[Activation](#activation)); it adds no pipeline logic of its own:
 
 ```bash
 bash scripts/ci/verify.sh        # exits non-zero on the first failing step
@@ -56,4 +56,10 @@ gate runs with none.
 ## Verified vs. not verified
 
 See the "CI verification" entry in `docs/implementation-roadmap.md` (Phase 13): the script was
-exercised locally on a clean copy of the repository; **it has not run on a hosted CI service.**
+exercised locally on a clean copy of the repository. The GitHub workflow was validated locally
+(YAML parse and structural checks only); **any hosted result is recorded in the roadmap after the
+run, and is separate from the earlier local evidence.** The workflow is `workflow_dispatch` only
+(no push/PR trigger), has `contents: read`, no secrets, no artifacts, a 45-minute job timeout, and a
+concurrency group that queues rather than cancels. It runs on the repository owner's included
+GitHub Actions allowance; the account has no payment method, so usage is blocked, not billed, if
+the allowance is exhausted (GitHub billing documentation).
