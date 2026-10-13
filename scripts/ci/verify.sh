@@ -41,7 +41,7 @@ cleanup() {
   set +e
   echo; echo "=== [ci] cleanup"
   docker rm -f "${PROJECT}-smoke-web" >/dev/null 2>&1
-  "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1
+  "${COMPOSE[@]}" down -v --remove-orphans --rmi local >/dev/null 2>&1
   docker rmi "${IMAGE_TAG}:runner" "${IMAGE_TAG}:migrate" >/dev/null 2>&1
   rm -rf "$TMP"
   if [ "$FAILED" -eq 0 ]; then echo "=== [ci] PASSED in $(( $(date +%s) - STARTED ))s (local/script run — not a hosted CI result)"
@@ -101,6 +101,11 @@ step "unit tests"; timeout 900 npm test
 provider_env
 
 # -------------------------------------------------- disposable PG + MinIO ----
+# MinIO publishes no prebuilt community image any more, so the test server is built from its
+# official source at a pinned tag (ci/minio/Dockerfile). Built separately so the compile has its
+# own bound and does not eat the service-start timeout below. A failure here fails the run.
+step "build pinned MinIO test server from official source (${PROJECT})"
+timeout 900 "${COMPOSE[@]}" build minio
 step "start disposable PostgreSQL + MinIO (${PROJECT})"
 timeout 300 "${COMPOSE[@]}" up -d --wait --wait-timeout 120
 PG_PORT="$("${COMPOSE[@]}" port postgres 5432 | sed 's/.*://')"

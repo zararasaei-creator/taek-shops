@@ -4008,8 +4008,8 @@ storage (the preflight makes that impossible).
 - My script's `S3_PUBLIC_BASE_URL` wrongly included the bucket (the app appends it) — corrected.
 
 **Not gated / known gaps.** `npm run format:check` is not in the pipeline: it already fails on 83 files (a
-one-off reformat is needed first). No dependency audit, header scan or load test. MinIO image tag is unpinned
-(same as the dev compose file). Hosted-CI behaviours the local run cannot show: runner OS packages for
+one-off reformat is needed first). No dependency audit, header scan or load test. The dev compose file's
+MinIO image is unpinned (CI no longer uses it — see the 2026-10-13 hosted-run entry). Hosted-CI behaviours the local run cannot show: runner OS packages for
 Chromium (`CI_PLAYWRIGHT_DEPS=1`), registry rate limits, runner resource limits (the 150 MB-fixture unit test and
 the e2e build are the heaviest steps), and Docker availability on the chosen host.
 
@@ -4019,6 +4019,47 @@ the e2e build are the heaviest steps), and Docker availability on the chosen hos
 upload of `test-results/`/`playwright-report/` — never `.local/`, `.env*`, dumps or `.e2e-storage-objects/`;
 (3) no registry-push or deploy credentials on this job; (4) the first hosted run is what will establish whether
 CI is actually green.
+
+#### First hosted CI run and the MinIO image blocker (2026-10-13)
+
+**Hosted run #1 — GitHub Actions, private repo `zararasaei-creator/taek-shops`, manual `workflow_dispatch` of
+`.github/workflows/verify.yml` at commit `3ff1f95` (run 38477190626): FAILED after ~2 min 17 s (≈3 billed minutes of the
+included allowance; the account has no payment method, so nothing can be billed).** What that run actually established
+— separate from every local result above: checkout, Node 24 setup, install, **typecheck and lint passed, and the 524
+unit tests (62 files) passed** on the hosted runner. It then **failed at "start disposable PostgreSQL + MinIO"**:
+Docker was refused the MinIO image (`unauthorized`). **Migrations, integration tests, e2e, the application build and
+both image builds were NOT executed** — so nothing about them is verified on a hosted runner yet.
+
+**Cause (confirmed vs. inferred).** *Confirmed on 2026-10-13:* anonymous pulls of `quay.io/minio/minio` and
+`quay.io/minio/mc` return 401 for every tag (including `latest` and the pinned release tags); `minio/minio` does not
+exist on Docker Hub; `dl.min.io` answers 410 Gone for every server and `mc` binary, including the signed archive
+binaries the upstream `Dockerfile.release` downloads; MinIO's own repository README says the community edition is
+"distributed as source code only" with no prebuilt binaries or images, the `minio/minio` and `minio/mc` repositories
+are archived (read-only), and the newest tag is `RELEASE.2025-10-15T17-29-55Z` (a security release). *Inferred:* that
+the registry images were deliberately withdrawn rather than temporarily private — consistent with the above, not
+stated by MinIO. The dev containers still work only because the images are cached locally.
+
+**Fix (CI only, smallest compatible change).** `ci/minio/Dockerfile` builds the same MinIO server and `mc` from the
+official source with `go install <module>@<pinned tag>` (server `RELEASE.2025-10-15T17-29-55Z`, `mc`
+`RELEASE.2025-08-13T08-35-41Z`; Go verifies modules against `go.sum` and the checksum database), from official base
+images pinned by digest (`golang:1.24-alpine`, Red Hat `ubi9/ubi-micro` — the base upstream's own Dockerfile uses).
+`ci/docker-compose.ci.yml` builds it instead of pulling `latest`; `scripts/ci/verify.sh` builds it in its own bounded
+step (900 s) before starting services and removes the built image on cleanup. **The skip guard and the MinIO test are
+unchanged**; no service was replaced, no mirror was published, nothing was uploaded.
+*Implications.* Licence AGPLv3 (built and run unmodified as a throwaway test dependency; not distributed).
+*Security:* the upstream project is archived, so **no further security fixes** — acceptable only for a disposable
+loopback test server with synthetic credentials, never for real data. A `go install` build reports a development
+version string. Every CI run now spends about 2 extra minutes compiling it (1 m 49 s measured with no cache).
+*Not changed:* the dev `docker-compose.yml` (and its comment calling `quay.io/minio/*` "the correct source") still
+reference the withdrawn images; they work here from the local cache and **will fail on a fresh machine or after a
+Docker prune** — decide separately whether dev should move to the same source build. Production uses cloud S3, not MinIO.
+
+**Verified locally (fresh no-cache build, isolated storage; not a hosted result).** Clean build from source in 1 m 49 s;
+through the updated CI compose file the service reported healthy under the existing `mc ready local` check; on a clean
+copy with no `.env`, against disposable tmpfs Postgres + this MinIO on loopback with synthetic credentials,
+`product-images-minio.integration.test.ts` passed **10/10** and the unchanged guard printed "10 tests passed, 0 skipped".
+The full suite was not rerun. **Hosted run #2 has not happened yet** at the time of this entry; until it does, treat the
+hosted pipeline as unproven beyond typecheck, lint and unit tests.
 
 **Smallest next milestone was: database backup and a verified restore drill — implemented (see next sub-milestone).**
 

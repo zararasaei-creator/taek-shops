@@ -16,7 +16,7 @@ It verifies; it does **not** deploy, publish an image, run a scheduler, or use a
 | --- | --- | --- |
 | install | `npm ci` | Lockfile only. Node **24** (`.nvmrc`; same as the production image). |
 | typecheck, lint, unit | `npm run typecheck`, `npm run lint`, `npm test` | No database. |
-| disposable services | `ci/docker-compose.ci.yml` | PostgreSQL 17 (tmpfs) + MinIO, ephemeral loopback ports, per-run synthetic credentials, unique compose project; torn down with `down -v`. |
+| disposable services | `ci/docker-compose.ci.yml` | PostgreSQL 17 (tmpfs) + MinIO (built from pinned official source, `ci/minio/Dockerfile`), ephemeral loopback ports, per-run synthetic credentials, unique compose project; torn down with `down -v --rmi local`. |
 | migrations | `prisma migrate deploy` | Against the disposable **test** database only (`DATABASE_URL` is overridden for that one command). |
 | integration | `npm run test:integration` equivalent | Existing isolation guard stays on (distinct DB names, live check). The script then **fails if the real-MinIO suite was skipped** (that suite skips silently when unconfigured). |
 | e2e | `npx playwright test` | Existing config: `PAYMENT_GATEWAY=e2e-fake`, `EMAIL_TRANSPORT=local-preview`, S3 blanked, own port/DB. Its `npm run build && npm run start` is also the application-build gate, so there is no separate `npm run build`. |
@@ -37,8 +37,12 @@ gate runs with none.
 - **`npm run format:check` is not in the pipeline.** It currently fails on 83 existing files
   (pre-existing, unrelated); gating it needs a one-off reformat commit first.
 - Dependency audit, security-header scan, load tests, and deployment/rollback are other Phase 13 items.
-- `quay.io/minio/minio:latest` is unpinned (same as `docker-compose.yml`); pin a release tag when
-  the host's registry access is known.
+- **MinIO is built from source in CI.** MinIO no longer publishes community images (`quay.io/minio/*`
+  refuses anonymous pulls, `dl.min.io` binaries are gone). `ci/minio/Dockerfile` builds the server and
+  `mc` from the official source at pinned tags, on digest-pinned official base images; `verify.sh`
+  builds it first (about 2 extra minutes). The upstream project is archived, so this is for a
+  disposable loopback test server with synthetic credentials only. The dev `docker-compose.yml` still
+  references the withdrawn images (they work only from the local cache).
 
 ## Activation
 
@@ -57,8 +61,11 @@ gate runs with none.
 
 See the "CI verification" entry in `docs/implementation-roadmap.md` (Phase 13): the script was
 exercised locally on a clean copy of the repository. The GitHub workflow was validated locally
-(YAML parse and structural checks only); **any hosted result is recorded in the roadmap after the
-run, and is separate from the earlier local evidence.** The workflow is `workflow_dispatch` only
+(YAML parse and structural checks only). **Hosted run #1 (2026-10-13) failed:** typecheck, lint and
+the 524 unit tests passed on the hosted runner; starting the services failed on the withdrawn MinIO
+image; integration, e2e and the application/image builds were not executed. See the roadmap entry
+"First hosted CI run and the MinIO image blocker". **Hosted results are recorded in the roadmap and
+are separate from the earlier local evidence.** The workflow is `workflow_dispatch` only
 (no push/PR trigger), has `contents: read`, no secrets, no artifacts, a 45-minute job timeout, and a
 concurrency group that queues rather than cancels. It runs on the repository owner's included
 GitHub Actions allowance; the account has no payment method, so usage is blocked, not billed, if
