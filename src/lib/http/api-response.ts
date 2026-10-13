@@ -5,12 +5,41 @@ import { isAuthError } from "@/server/auth/errors";
 import { isCatalogError } from "@/server/catalog/errors";
 import { isImportFileError } from "@/server/import/errors";
 import { CsrfError } from "@/lib/http/csrf";
+import { errorFields, logError } from "@/server/observability/logger";
 
 /**
  * Uniform JSON error responses for route handlers. Only safe, typed errors are
- * surfaced with detail; anything else becomes a generic 500 (and is logged
- * server-side) so internals never leak.
+ * surfaced with detail; anything else becomes a generic 500 so internals never
+ * leak to the client — and is logged server-side as ONE structured event
+ * (`api.unhandled_error`: request method + path, an optional proxy-supplied request
+ * id, and the error's class name + category), never the raw error object, message,
+ * stack or cause (those can echo secrets, SQL, or customer data).
  */
+
+/** Non-sensitive request facts that make an unexpected failure traceable. */
+export interface ErrorContext {
+  method?: string;
+  path?: string;
+  requestId?: string;
+}
+
+/**
+ * Method, path (no query string — it can carry tokens) and the reverse proxy's
+ * `x-request-id` when one was supplied and is a plain identifier. No id is invented
+ * here: the app has no request-scoped correlation id of its own.
+ */
+export function errorContextOf(request: Request | undefined): ErrorContext {
+  if (!request) return {};
+  const context: ErrorContext = { method: request.method };
+  try {
+    context.path = new URL(request.url).pathname;
+  } catch {
+    /* unparseable URL: log without a path */
+  }
+  const requestId = request.headers.get("x-request-id");
+  if (requestId && /^[A-Za-z0-9._-]{8,64}$/.test(requestId)) context.requestId = requestId;
+  return context;
+}
 
 export interface ApiErrorBody {
   error: { code: string; message: string; details?: unknown };
@@ -21,7 +50,7 @@ export function apiError(code: string, message: string, status: number, details?
   return NextResponse.json(body, { status });
 }
 
-export function toErrorResponse(error: unknown) {
+export function toErrorResponse(error: unknown, context: ErrorContext = {}) {
   if (isAuthError(error)) {
     const headers =
       error.code === "rate_limited" && "retryAfterSeconds" in error
@@ -52,7 +81,7 @@ export function toErrorResponse(error: unknown) {
     return apiError("validation", "Invalid request.", 422, error.flatten());
   }
 
-  console.error("[api] unhandled error:", error);
+  logError("api.unhandled_error", { ...context, ...errorFields(error) });
   return apiError("internal", "Something went wrong.", 500);
 }
 
@@ -64,7 +93,7 @@ export function route<Args extends unknown[]>(
     try {
       return await handler(...args);
     } catch (error) {
-      return toErrorResponse(error);
+      return toErrorResponse(error, errorContextOf(args.find((arg): arg is Request => arg instanceof Request)));
     }
   };
 }

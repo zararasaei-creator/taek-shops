@@ -103,6 +103,27 @@ export const productOptionsSchema = z.object({
 });
 export type ProductOptionsInput = z.infer<typeof productOptionsSchema>;
 
+/**
+ * Extend an existing product with a brand-new option. If the product already
+ * has variants, `backfill` must supply exactly one of the new `values` for
+ * every existing variant — see `extendProductOption` in option-service.ts.
+ */
+export const extendOptionInputSchema = z.object({
+  name: z.string().trim().min(1).max(60),
+  values: z.array(z.string().trim().min(1).max(80)).min(1).max(100),
+  position: z.number().int().min(0).max(1000).default(0),
+  backfill: z
+    .array(
+      z.object({
+        variantId: z.string().min(1),
+        value: z.string().trim().min(1).max(80),
+      }),
+    )
+    .max(10_000)
+    .default([]),
+});
+export type ExtendOptionInput = z.input<typeof extendOptionInputSchema>;
+
 // ---------------------------------------------------------------------------
 // Variant
 // ---------------------------------------------------------------------------
@@ -131,6 +152,21 @@ export type VariantCreateInput = z.input<typeof variantCreateSchema>;
 
 export const variantUpdateSchema = variantCreateSchema.omit({ initialQuantity: true }).partial();
 export type VariantUpdateInput = z.input<typeof variantUpdateSchema>;
+
+/**
+ * One generated cell from the admin Variant Matrix Generator — the same shape
+ * as a single variant create, except a matrix cell must select at least one
+ * option (a 0-dimension "matrix" isn't a matrix).
+ */
+export const matrixCellSchema = variantCreateSchema.extend({
+  optionSelections: z.array(variantOptionSelectionSchema).min(1).max(20),
+});
+export type MatrixCellInput = z.input<typeof matrixCellSchema>;
+
+export const matrixGenerateSchema = z.object({
+  cells: z.array(matrixCellSchema).min(1).max(500),
+});
+export type MatrixGenerateInput = z.input<typeof matrixGenerateSchema>;
 
 // ---------------------------------------------------------------------------
 // Images

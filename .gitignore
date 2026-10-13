@@ -12,6 +12,7 @@
 
 # next.js
 /.next/
+/.next-e2e/
 /out/
 
 # production build
@@ -48,6 +49,10 @@ secrets/
 /data
 /postgres-data
 *.sqlite
+# database backups (scripts/db/backup.sh) — never committed
+*.dump
+*.dump.sha256
+*.dump.partial
 *.sqlite3
 *.db
 
@@ -55,6 +60,12 @@ secrets/
 /uploads
 /tmp
 /storage
+# dedicated, isolated local-storage root for the e2e harness (Phase 9)
+/.e2e-storage-objects
+
+# local order-email previews (Phase 8) — rendered message content for
+# developer review only, never delivery, never committed
+/.local/
 
 # generated code (Prisma client, etc.)
 /src/generated

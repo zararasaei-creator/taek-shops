@@ -1,16 +1,17 @@
 import { NextResponse } from "next/server";
-import { serverEnv } from "@/server/config/env";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Liveness probe. Confirms the process is up and that environment configuration
- * parsed successfully. Deliberately reports no secrets.
+ * LIVENESS probe: the process is up and answering HTTP. It deliberately does NOT touch the
+ * database (so a database blip never makes an orchestrator restart a healthy process) and
+ * reveals nothing about configuration — no environment name, no versions, no hostnames. Importing
+ * `serverEnv` here is intentionally avoided; a misconfigured environment is caught by the app's
+ * other routes failing and by the readiness probe (`/api/health/ready`).
  */
 export function GET() {
-  return NextResponse.json({
-    status: "ok",
-    environment: serverEnv.NODE_ENV,
-    timestamp: new Date().toISOString(),
-  });
+  return NextResponse.json(
+    { status: "ok", timestamp: new Date().toISOString() },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }

@@ -82,6 +82,42 @@ describe("previewImport (dry-run)", () => {
       previewImport(manager, { filename: "p.csv", bytes: enc("sku,product_name\nA-1,X\n") }, db),
     ).rejects.toThrow(/Missing required column/);
   });
+
+  it("rejects a known-but-unsupported spreadsheet format before parsing", async () => {
+    // .xlsx graduated to supported this pass (see import-xlsx-service tests);
+    // .xlsm remains explicitly refused.
+    await expect(
+      previewImport(
+        manager,
+        { filename: "catalog.xlsm", bytes: enc(HEADER + "A-1,X,9.99,,\n") },
+        db,
+      ),
+    ).rejects.toThrow(/csv|xlsx/i);
+  });
+
+  it("warns when a row uses a value the existing product doesn't declare for that option", async () => {
+    db.product.findUnique.mockResolvedValue({
+      options: [{ name: "EU Size", values: [{ value: "38" }, { value: "39" }] }],
+    } as never);
+    const csv =
+      "sku,product_name,product_slug,price,option1_name,option1_value\n" +
+      "SHOE-EU-40,Adult Shoe,adult-shoe,59.99,EU Size,40\n";
+    const preview = await previewImport(manager, { filename: "p.csv", bytes: enc(csv) }, db);
+
+    expect(preview.rows[0]!.action).not.toBe("error");
+    expect(preview.rows[0]!.warnings.join(" ")).toMatch(/new value for the existing option/i);
+  });
+
+  it("does not warn when the value is already declared for that option", async () => {
+    db.product.findUnique.mockResolvedValue({
+      options: [{ name: "EU Size", values: [{ value: "38" }, { value: "39" }, { value: "40" }] }],
+    } as never);
+    const csv =
+      "sku,product_name,product_slug,price,option1_name,option1_value\n" +
+      "SHOE-EU-40,Adult Shoe,adult-shoe,59.99,EU Size,40\n";
+    const preview = await previewImport(manager, { filename: "p.csv", bytes: enc(csv) }, db);
+    expect(preview.rows[0]!.warnings.join(" ")).not.toMatch(/new value/i);
+  });
 });
 
 describe("commitImport (guards + row isolation)", () => {
@@ -142,6 +178,60 @@ describe("commitImport (guards + row isolation)", () => {
     );
     expect(db.auditLog.create.mock.calls.at(-1)?.[0]?.data?.action).toBe(
       "import.product.committed",
+    );
+  });
+
+  it("refuses a new option column for an existing product that already has other variants", async () => {
+    db.importJob.findUnique.mockResolvedValue({
+      id: "job_1",
+      status: ImportJobStatus.VALIDATED,
+      type: "PRODUCT",
+    } as never);
+    db.importJob.update.mockResolvedValue({} as never);
+    db.importJob.findUniqueOrThrow.mockReturnValue({
+      rows: () =>
+        Promise.resolve([
+          {
+            id: "row_1",
+            rowNumber: 2,
+            sku: "NEW-COLOUR-1",
+            status: ImportRowStatus.PENDING,
+            rawData: {
+              raw: {
+                sku: "NEW-COLOUR-1",
+                product_name: "Existing Product",
+                price: "19.99",
+                option1_name: "Colour",
+                option1_value: "Red",
+              },
+            },
+          },
+        ]),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    db.importJobRow.update.mockResolvedValue({} as never);
+
+    // The row's product already exists and already has other variants; the
+    // "Colour" option is brand-new to it (findUnique returns null).
+    db.product.findUnique.mockResolvedValue({
+      id: "prod_1",
+      description: null,
+      brandId: null,
+      categoryId: null,
+    } as never);
+    db.productVariant.count.mockResolvedValue(2);
+    db.productVariant.findUnique.mockResolvedValue(null);
+    db.productOption.findUnique.mockResolvedValue(null);
+
+    const result = await commitImport(manager, "job_1", {}, db);
+
+    expect(result.counts.failed).toBe(1);
+    expect(db.product.create).not.toHaveBeenCalled();
+    expect(db.productVariant.create).not.toHaveBeenCalled();
+    const rowUpdate = db.importJobRow.update.mock.calls.at(-1)?.[0]?.data;
+    expect(rowUpdate?.status).toBe(ImportRowStatus.FAILED);
+    expect(JSON.stringify(rowUpdate?.errors)).toMatch(
+      /extend options|does not exist on this product/,
     );
   });
 });

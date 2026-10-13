@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { E2E_ORIGIN } from "./helpers/base-url";
+
 /**
  * Phase 3 auth checks that do not require a database. Full sign-in flows are
  * covered by unit tests (mocked Prisma) until a live Postgres is wired for e2e.
@@ -48,7 +50,7 @@ test("admin API rejects unauthenticated access with 401", async ({ request }) =>
 
 test("login rejects a request with no CSRF token", async ({ request }) => {
   const response = await request.post("/api/auth/login", {
-    headers: { origin: "http://localhost:3000", "content-type": "application/json" },
+    headers: { origin: E2E_ORIGIN, "content-type": "application/json" },
     data: { email: "someone@example.com", password: "whatever-value" },
   });
   expect(response.status()).toBe(403);

@@ -14,6 +14,8 @@ interface StoreFormProps {
   hidden?: Record<string, string>;
   variant?: "primary" | "secondary";
   className?: string;
+  /** Disable submission, e.g. while an option picker hasn't resolved to a real variant yet. */
+  disabled?: boolean;
 }
 
 /** Storefront form bound to a server action, with inline error rendering. */
@@ -25,6 +27,7 @@ export function StoreForm({
   hidden,
   variant = "primary",
   className,
+  disabled,
 }: StoreFormProps) {
   const [state, formAction, pending] = useActionState(action, null);
 
@@ -36,7 +39,7 @@ export function StoreForm({
           ))
         : null}
       {children}
-      <Button type="submit" variant={variant} disabled={pending}>
+      <Button type="submit" variant={variant} disabled={pending || disabled}>
         {pending ? (pendingLabel ?? "Working…") : submitLabel}
       </Button>
       {state?.ok === false ? (

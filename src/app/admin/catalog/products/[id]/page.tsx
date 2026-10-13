@@ -12,9 +12,13 @@ import { listCategories } from "@/server/catalog/category-service";
 import { formatCents } from "@/server/domain/money";
 import { ActionForm, Field, Select, TextArea } from "@/components/admin/action-form";
 import { StatusButtons } from "@/app/admin/catalog/products/[id]/status-buttons";
+import { ExtendOptionForm } from "@/app/admin/catalog/products/[id]/extend-option-form";
+import { VariantMatrixGenerator } from "@/app/admin/catalog/products/[id]/variant-matrix-generator";
+import { ImagePanel } from "@/app/admin/catalog/products/[id]/image-panel";
 import {
   addOptionAction,
   addVariantAction,
+  extendOptionAction,
   updateProductAction,
 } from "@/app/admin/catalog/actions";
 
@@ -42,6 +46,7 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
   const updateBound = updateProductAction.bind(null, product.id);
   const addOptionBound = addOptionAction.bind(null, product.id);
   const addVariantBound = addVariantAction.bind(null, product.id);
+  const extendOptionBound = extendOptionAction.bind(null, product.id);
 
   return (
     <Container className="max-w-4xl py-10">
@@ -132,9 +137,17 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
                 />
               </ActionForm>
             ) : (
-              <p className="mt-3 text-xs text-zinc-500">
-                Options are locked once variants exist. Remove all variants to change them.
-              </p>
+              <ExtendOptionForm
+                action={extendOptionBound}
+                variants={product.variants.map((v) => ({
+                  id: v.id,
+                  label: `${v.sku}${
+                    v.optionValues.length > 0
+                      ? ` (${v.optionValues.map((ov) => `${ov.option.name}: ${ov.optionValue.value}`).join(", ")})`
+                      : ""
+                  }`,
+                }))}
+              />
             )}
           </section>
 
@@ -199,29 +212,35 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
                 ))}
               </ActionForm>
             </details>
+
+            <details className="mt-4">
+              <summary className="cursor-pointer text-sm font-medium">
+                Generate a variant matrix
+              </summary>
+              <VariantMatrixGenerator
+                productId={product.id}
+                productSlug={product.slug}
+                options={product.options.map((option) => ({
+                  id: option.id,
+                  name: option.name,
+                  values: option.values.map((v) => ({ id: v.id, value: v.value })),
+                }))}
+                existingSignatures={product.variants.map((v) => v.optionSignature)}
+              />
+            </details>
           </section>
 
           <section className="mt-10">
             <h2 className="text-lg font-semibold">Images ({images.length})</h2>
-            <ul className="mt-2 flex flex-wrap gap-3">
-              {images.map((image) => (
-                <li key={image.id} className="text-xs">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={image.resolvedUrl}
-                    alt={image.altText ?? product.name}
-                    className="h-24 w-24 rounded border border-zinc-200 object-cover dark:border-zinc-800"
-                  />
-                  {image.isPrimary ? <div className="mt-1 text-center">primary</div> : null}
-                </li>
-              ))}
-              {images.length === 0 ? (
-                <li className="text-sm text-zinc-500">
-                  No images. Image upload UI is scheduled for a later phase; the storage abstraction
-                  and API are in place.
-                </li>
-              ) : null}
-            </ul>
+            <ImagePanel
+              productId={product.id}
+              images={images.map((image) => ({
+                id: image.id,
+                resolvedUrl: image.resolvedUrl,
+                altText: image.altText,
+                isPrimary: image.isPrimary,
+              }))}
+            />
           </section>
         </>
       )}

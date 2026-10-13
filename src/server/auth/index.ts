@@ -50,4 +50,10 @@ export {
   changeOwnPassword,
 } from "@/server/auth/verification";
 
+export {
+  registerCustomer,
+  resendVerificationForUser,
+  type RegistrationInput,
+} from "@/server/auth/registration";
+
 export * from "@/server/auth/errors";

@@ -1,11 +1,12 @@
 import { serverEnv } from "@/server/config/env";
 import { LocalObjectStorage } from "@/server/storage/local-object-storage";
+import { S3ObjectStorage } from "@/server/storage/s3-object-storage";
 import type { ObjectStorage } from "@/server/storage/object-storage";
 
 /**
- * Storage backend selection. Returns the S3-compatible backend when `S3_*` is
- * fully configured; otherwise the local-filesystem backend. The S3 backend
- * itself is a later phase — this factory is the single switch point.
+ * Storage backend selection. Returns the S3-compatible backend (real S3 or
+ * local MinIO — see `docker-compose.yml`) when `S3_*` is fully configured;
+ * otherwise the local-filesystem backend used by dev/tests without Docker.
  */
 
 let cached: ObjectStorage | undefined;
@@ -23,11 +24,15 @@ function s3Configured(): boolean {
 export function getObjectStorage(): ObjectStorage {
   if (cached) return cached;
   if (s3Configured()) {
-    // TODO(phase-image-upload): construct S3ObjectStorage from serverEnv.S3_*.
-    // Falling back to local until that backend lands avoids a hard failure.
-    console.warn(
-      "[storage] S3_* is configured but the S3 backend is not implemented yet; using local storage.",
-    );
+    cached = new S3ObjectStorage({
+      endpoint: serverEnv.S3_ENDPOINT!,
+      region: serverEnv.S3_REGION!,
+      bucket: serverEnv.S3_BUCKET!,
+      accessKeyId: serverEnv.S3_ACCESS_KEY_ID!,
+      secretAccessKey: serverEnv.S3_SECRET_ACCESS_KEY!,
+      publicBaseUrl: serverEnv.S3_PUBLIC_BASE_URL,
+    });
+    return cached;
   }
   cached = new LocalObjectStorage();
   return cached;

@@ -54,6 +54,27 @@ describe("parseProductRow", () => {
     expect(parseProductRow({ ...baseRow, compare_at_price: "49.99" }).errors).toEqual([]);
   });
 
+  it("reads on-hand inventory from inventory_on_hand", () => {
+    expect(parseProductRow({ ...baseRow, inventory_on_hand: "5" }).data?.inventoryOnHand).toBe(5);
+    expect(parseProductRow({ ...baseRow, inventory_on_hand: "0" }).data?.inventoryOnHand).toBe(0);
+    expect(parseProductRow({ ...baseRow }).data?.inventoryOnHand).toBeUndefined();
+    expect(codes(parseProductRow({ ...baseRow, inventory_on_hand: "-3" }).errors)).toContain(
+      "out_of_range",
+    );
+    expect(codes(parseProductRow({ ...baseRow, inventory_on_hand: "abc" }).errors)).toContain(
+      "invalid_integer",
+    );
+  });
+
+  it("still accepts the legacy inventory_quantity header as an alias", () => {
+    expect(parseProductRow({ ...baseRow, inventory_quantity: "7" }).data?.inventoryOnHand).toBe(7);
+    // Canonical wins when both are present.
+    expect(
+      parseProductRow({ ...baseRow, inventory_on_hand: "9", inventory_quantity: "7" }).data
+        ?.inventoryOnHand,
+    ).toBe(9);
+  });
+
   it("maps status case-insensitively and rejects unknowns", () => {
     expect(parseProductRow({ ...baseRow, status: "Active" }).data?.status).toBe(
       ProductStatus.ACTIVE,
@@ -102,5 +123,27 @@ describe("parseProductRow", () => {
     expect(
       parseProductRow({ ...baseRow, image_url: "https://cdn.example.com/a.jpg" }).data?.imageUrl,
     ).toBe("https://cdn.example.com/a.jpg");
+  });
+
+  it("parses a variant-level image URL independently of the product image", () => {
+    const { data, errors } = parseProductRow({
+      ...baseRow,
+      image_url: "https://cdn.example.com/product.jpg",
+      variant_image_url: "https://cdn.example.com/variant-140.jpg",
+    });
+    expect(errors).toEqual([]);
+    expect(data?.imageUrl).toBe("https://cdn.example.com/product.jpg");
+    expect(data?.variantImageUrl).toBe("https://cdn.example.com/variant-140.jpg");
+  });
+
+  it("validates variant_image_url the same way as image_url", () => {
+    expect(
+      codes(parseProductRow({ ...baseRow, variant_image_url: "http://x/y.jpg" }).errors),
+    ).toContain("not_https");
+    expect(codes(parseProductRow({ ...baseRow, variant_image_url: "nope" }).errors)).toContain(
+      "invalid_url",
+    );
+    const clean = parseProductRow({ ...baseRow });
+    expect(clean.data?.variantImageUrl).toBeUndefined();
   });
 });

@@ -109,6 +109,15 @@ export function placeOrderInput(shippingMethodId: string, over?: Partial<Record<
 /**
  * Remove test carts + orders + every audit row tied to them (order.placed,
  * order.status.changed, payment.*). Tax/shipping config rows are left in place.
+ *
+ * `payment.webhook.unhandled` / `payment.webhook.stale` audit rows are
+ * deliberately NOT touched here: by design (see `payment-service.ts` /
+ * `api/webhooks/stripe/route.ts`) they carry no `entityId`, so there is no
+ * fixture-owned identifier to scope a delete by. Neither this suite nor the
+ * payments suite actually produces those actions, so there is nothing of
+ * ours to clean up — a previous version of this function deleted them by a
+ * bare action-name prefix, which would have erased unrelated webhook audit
+ * history from the whole database. Never reintroduce that.
  */
 export async function cleanupCheckout(): Promise<void> {
   const orders = await db.order.findMany({
@@ -116,9 +125,6 @@ export async function cleanupCheckout(): Promise<void> {
     select: { id: true },
   });
   await db.auditLog.deleteMany({ where: { entityId: { in: orders.map((o) => o.id) } } });
-  await db.auditLog.deleteMany({
-    where: { action: { startsWith: "payment.webhook." } },
-  });
   await db.order.deleteMany({ where: { customerEmail: { contains: "phase6" } } });
   await db.cart.deleteMany({ where: { token: { startsWith: TEST_CART_TOKEN_PREFIX } } });
 }

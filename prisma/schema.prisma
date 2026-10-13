@@ -177,13 +177,15 @@ model User {
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
 
-  sessions       Session[]
-  addresses      Address[]
-  carts          Cart[]
-  orders         Order[]
-  importJobs     ImportJob[]     @relation("ImportJobCreatedBy")
-  stockMovements StockMovement[] @relation("StockMovementActor")
-  auditLogs      AuditLog[]      @relation("AuditActor")
+  sessions            Session[]
+  addresses           Address[]
+  carts               Cart[]
+  orders              Order[]
+  importJobs          ImportJob[]          @relation("ImportJobCreatedBy")
+  stockMovements      StockMovement[]      @relation("StockMovementActor")
+  auditLogs           AuditLog[]           @relation("AuditActor")
+  refundsRequested    Refund[]             @relation("RefundRequestedBy")
+  imageUploadsCreated ProductImageUpload[] @relation("ProductImageUploadCreatedBy")
 
   @@index([role])
   @@index([status])
@@ -296,12 +298,13 @@ model Product {
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
-  category   Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  brand      Brand?           @relation(fields: [brandId], references: [id], onDelete: SetNull)
-  variants   ProductVariant[]
-  options    ProductOption[]
-  images     ProductImage[]
-  orderItems OrderItem[]
+  category     Category?            @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  brand        Brand?               @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  variants     ProductVariant[]
+  options      ProductOption[]
+  images       ProductImage[]
+  imageUploads ProductImageUpload[]
+  orderItems   OrderItem[]
 
   @@index([categoryId])
   @@index([brandId])
@@ -367,6 +370,7 @@ model ProductVariant {
   product        Product                     @relation(fields: [productId], references: [id], onDelete: Cascade)
   optionValues   ProductVariantOptionValue[]
   images         ProductImage[]
+  imageUploads   ProductImageUpload[]
   inventoryItem  InventoryItem?
   stockMovements StockMovement[]
   cartItems      CartItem[]
@@ -410,6 +414,58 @@ model ProductImage {
 
   @@index([productId])
   @@index([variantId])
+}
+
+// Tracks an in-flight direct upload from the moment a signed upload slot is
+// created until the admin finalizes it (bytes validated, `ProductImage` row
+// created — see `image-service.ts`). A row here means "staged, not yet a
+// real image" — the storefront and admin image lists never read this table,
+// only `ProductImage`, so an unfinalized upload is never exposed. A row
+// that outlives a bounded age (abandoned tab, crashed browser, network
+// failure) is swept by `scripts/cleanup-image-uploads.ts` (`npm run
+// images:cleanup-uploads`), which deletes both the staged storage object and
+// this row. Finalizing (success or rejection) also deletes the row
+// immediately — this table only ever holds genuinely pending or abandoned
+// uploads, never a history.
+model ProductImageUpload {
+  id                 String   @id @default(cuid())
+  productId          String
+  variantId          String?
+  storageKey         String   @unique
+  claimedContentType String
+  createdById        String?
+  createdAt          DateTime @default(now())
+  // Bounded cleanup retry (mirrors OrderEmail's attempts/maxAttempts in
+  // src/server/notifications/): a storage-delete failure during
+  // `sweepAbandonedImageUploads` increments this and KEEPS the row so a
+  // later sweep can retry, rather than silently dropping the only record
+  // of an orphaned object. Only once attempts reach maxAttempts does the
+  // sweep give up and remove the row anyway (logged), so a permanently
+  // undeletable object can't wedge this table open forever.
+  attempts    Int @default(0)
+  maxAttempts Int @default(5)
+
+  // Durable claim/recovery tracking (finalize concurrency + crash safety —
+  // see `finalizeProductImageUpload` and `sweepAbandonedImageUploads`).
+  // `claimedAt` is set atomically via a conditional UPDATE (never a DELETE)
+  // the instant a finalize call begins — the row deliberately SURVIVES the
+  // claim, so it remains this upload's only durable recovery record for the
+  // whole finalize attempt, not just until the claim succeeds. `finalKey`
+  // is set just before the validated bytes are written to their final
+  // storage key, so a crash between that write and the `ProductImage`
+  // insert is still distinguishable (by the sweep) from a crash that never
+  // got that far, and from a row that lingered despite the image having
+  // actually been attached.
+  claimedAt DateTime?
+  finalKey  String?
+
+  product   Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  createdBy User?           @relation("ProductImageUploadCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([productId])
+  @@index([createdAt])
+  @@index([claimedAt])
 }
 
 // ============================================================================
@@ -544,6 +600,7 @@ model Order {
   addresses OrderAddress[]
   payments  Payment[]
   discounts OrderDiscount[]
+  emails    OrderEmail[]
 
   @@index([userId])
   @@index([status])
@@ -625,13 +682,50 @@ model Payment {
   createdAt         DateTime                 @default(now())
   updatedAt         DateTime                 @updatedAt
 
-  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order   Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  refunds Refund[]
 
   // One payment record per order — the application-level guard against a
   // duplicate charge (Phase 7). Refunds (Phase 8) mutate this same row.
   @@unique([orderId])
   @@unique([provider, providerPaymentId])
   @@index([orderId])
+  @@index([status])
+}
+
+enum RefundStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+// One row per refund REQUEST (not per settled amount) — a payment can have
+// several, each independently tracked through the provider's own async
+// lifecycle (Phase 8). `Payment.refundedCents` only ever reflects SUCCEEDED
+// rows; PENDING rows reserve part of the refundable balance so two concurrent
+// requests can never together exceed the captured amount.
+model Refund {
+  id               String       @id @default(cuid())
+  paymentId        String
+  amountCents      Int
+  currency         Currency     @default(CAD)
+  status           RefundStatus @default(PENDING)
+  reason           String
+  // Caller-supplied, stable per refund attempt — the de-dup key for double
+  // clicks / retries, mirrored as the provider-side idempotency key too.
+  idempotencyKey   String       @unique
+  provider         String
+  providerRefundId String?
+  errorMessage     String?
+  requestedById    String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  payment     Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  requestedBy User?   @relation("RefundRequestedBy", fields: [requestedById], references: [id], onDelete: SetNull)
+
+  @@unique([provider, providerRefundId])
+  @@index([paymentId])
   @@index([status])
 }
 
@@ -649,6 +743,64 @@ model WebhookEvent {
 
   @@index([type])
   @@index([receivedAt])
+}
+
+enum OrderEmailType {
+  ORDER_CONFIRMATION
+  SHIPPING_NOTIFICATION
+}
+
+// `SENT` means the configured `OrderMailer` transport completed without
+// throwing — it does NOT by itself mean a real email reached an inbox. This
+// milestone's only production-path transport is `LocalPreviewOrderMailer`
+// (`src/server/notifications/order-mailer.ts`), which writes the rendered
+// message to a local, gitignored file and sends nothing anywhere. So today,
+// in every environment, every `SENT` row is a local preview, not delivery —
+// by construction, not by convention. When a real transport is added behind
+// the same `OrderMailer` interface, this comment (and the equivalent one in
+// `email-outbox.ts`'s module doc) MUST be updated, since `SENT` will then
+// mean different things depending on which transport handled that specific
+// row — this schema does not currently record which transport that was.
+enum OrderEmailStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+}
+
+// Durable email outbox (Phase 8). One row per (order, event type) — the
+// `@@unique([orderId, type])` below is both the row-existence dedup (a
+// redelivered/duplicate qualifying event never creates a second job) and,
+// structurally, a second independent guarantee for SHIPPING_NOTIFICATION:
+// the fulfilment state machine only ever reaches FULFILLED once per order
+// (FULFILLED -> RETURNED has no way back). `idempotencyKey` is generated
+// once at insert and never changes — passed to the transport on every send
+// attempt for this row, so a transport that itself honours idempotency keys
+// (unlike our local preview/fake transports) can safely receive the same
+// attempt twice. This is at-least-once delivery with a stable key ready for
+// such a provider — NOT a verified exactly-once guarantee (a crash between
+// a real transport accepting the message and this row committing `SENT`
+// would still retry).
+model OrderEmail {
+  id             String           @id @default(cuid())
+  orderId        String
+  type           OrderEmailType
+  status         OrderEmailStatus @default(PENDING)
+  idempotencyKey String           @unique @default(cuid())
+  attempts       Int              @default(0)
+  maxAttempts    Int              @default(5)
+  nextAttemptAt  DateTime         @default(now())
+  claimedAt      DateTime?
+  claimedBy      String?
+  lastError      String?
+  sentAt         DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, type])
+  @@index([status, nextAttemptAt])
 }
 
 // ============================================================================

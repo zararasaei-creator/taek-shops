@@ -15,6 +15,18 @@ import { z } from "zod";
 
 const nodeEnv = z.enum(["development", "test", "production"]).default("development");
 
+/**
+ * `.optional()` alone only tolerates a genuinely ABSENT key — an empty
+ * string (e.g. a blank `S3_ENDPOINT=` line, or the e2e harness explicitly
+ * clearing an inherited value it doesn't want — see `playwright.config.ts`)
+ * still gets validated and fails. Wrapping with this treats an empty
+ * string the same as unset, for optional config that has no meaningful
+ * empty value anyway.
+ */
+function optionalOrEmpty<T extends z.ZodTypeAny>(schema: T) {
+  return z.preprocess((value) => (value === "" ? undefined : value), schema);
+}
+
 const serverSchema = z.object({
   NODE_ENV: nodeEnv,
 
@@ -39,17 +51,62 @@ const serverSchema = z.object({
   STRIPE_SECRET_KEY: z.string().min(1).optional(),
   STRIPE_WEBHOOK_SECRET: z.string().min(1).optional(),
 
-  // Object storage (S3-compatible) for product images.
-  S3_ENDPOINT: z.url().optional(),
-  S3_REGION: z.string().min(1).optional(),
-  S3_BUCKET: z.string().min(1).optional(),
-  S3_ACCESS_KEY_ID: z.string().min(1).optional(),
-  S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
-  S3_PUBLIC_BASE_URL: z.url().optional(),
+  // Object storage (S3-compatible) for product images. `optionalOrEmpty`
+  // because the e2e harness explicitly blanks these out (see
+  // `playwright.config.ts`) to force the local-filesystem backend even
+  // when local dev's `.env` has real MinIO values configured.
+  S3_ENDPOINT: optionalOrEmpty(z.url().optional()),
+  S3_REGION: optionalOrEmpty(z.string().min(1).optional()),
+  S3_BUCKET: optionalOrEmpty(z.string().min(1).optional()),
+  S3_ACCESS_KEY_ID: optionalOrEmpty(z.string().min(1).optional()),
+  S3_SECRET_ACCESS_KEY: optionalOrEmpty(z.string().min(1).optional()),
+  S3_PUBLIC_BASE_URL: optionalOrEmpty(z.url().optional()),
 
   // Spreadsheet import guard rails (safe defaults defined here, overridable via env).
   IMPORT_MAX_FILE_SIZE_BYTES: z.coerce.number().int().positive().default(5_000_000),
   IMPORT_MAX_ROW_COUNT: z.coerce.number().int().positive().default(10_000),
+
+  // Email transport (auth emails + the Phase 8 order-email outbox share one
+  // provider selection). Explicit transport selection is required in
+  // production — see `src/server/email/transport.ts`'s `resolveTransport`,
+  // which refuses to silently fall back to a local/no-op transport there.
+  // Outside production this is optional; unset defaults to a local preview
+  // transport that writes rendered messages to `.local/email-previews/`
+  // and sends nothing anywhere.
+  EMAIL_TRANSPORT: optionalOrEmpty(z.enum(["resend", "local-preview", "noop"]).optional()),
+  RESEND_API_KEY: optionalOrEmpty(z.string().min(1).optional()),
+  // "Name <email@domain>" or a bare address — passed through to Resend's
+  // own `from` field unvalidated beyond basic email shape on the address
+  // part; Resend itself rejects a sender on an unverified domain.
+  EMAIL_FROM_ADDRESS: optionalOrEmpty(z.string().min(1).optional()),
+
+  // Abandoned-checkout reservation recovery (launch-prep milestone). A
+  // `PENDING`/`UNPAID` order is only ever considered for expiry once it is
+  // at least this old — generous on purpose: this is the FLOOR on how
+  // stale an order must be before the sweep looks at it at all, never a
+  // guarantee it acts immediately at that age (a still-processing or
+  // genuinely-undetermined payment is preserved regardless of age — see
+  // `src/server/orders/order-expiry.ts`).
+  ORDER_EXPIRY_MINUTES: z.coerce.number().int().positive().default(60),
+
+  // Rollout boundary for durable payment-creation claims (see
+  // `claimEra` in `src/server/orders/payment-service.ts`). Every order
+  // created at/after this instant is guaranteed to have written a claim BEFORE
+  // any provider payment call, so "no local Payment row" then proves "no
+  // payment was ever attempted". Earlier orders ("legacy") may have a provider
+  // PaymentIntent with no local record, and Stripe Search is eventually
+  // consistent, so a search miss never authorizes releasing their stock.
+  // UNSET FAILS CLOSED: no order can be proven never-attempted on that
+  // evidence, so they are preserved and flagged — it is never an assertion
+  // that no pre-claim orders exist. Set it to (last old instance stopped +
+  // in-flight margin), ISO-8601, e.g. 2026-10-06T00:00:00Z; later is safe,
+  // earlier is not. See the roadmap's "Establishing the rollout boundary".
+  PAYMENT_CLAIMS_ACTIVE_SINCE: optionalOrEmpty(
+    z
+      .string()
+      .refine((v) => !Number.isNaN(Date.parse(v)), "must be an ISO-8601 timestamp")
+      .optional(),
+  ),
 });
 
 const clientSchema = z.object({

@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { E2E_ORIGIN } from "./helpers/base-url";
+
 /**
  * Phase 4 catalogue checks that do not require a database. Full admin CRUD and
  * import round-trips are covered by unit tests (mocked Prisma) until a live
@@ -19,7 +21,7 @@ test("catalog product API requires authentication", async ({ request }) => {
 
 test("inventory adjust API requires authentication + CSRF", async ({ request }) => {
   const noCsrf = await request.post("/api/admin/inventory/adjust", {
-    headers: { origin: "http://localhost:3000", "content-type": "application/json" },
+    headers: { origin: E2E_ORIGIN, "content-type": "application/json" },
     data: { sku: "ABC-1", delta: 1, reason: "x" },
   });
   expect(noCsrf.status()).toBe(403); // guardMutation runs first

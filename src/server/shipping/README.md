@@ -4,8 +4,8 @@
 
 **No shipping prices in code.** They are operator data in `ShippingZone`,
 `ShippingZoneRegion`, and `ShippingMethod` (the seed adds an example
-"Canada / Standard" $12 method with free shipping over $150; the admin UI is
-Phase 11).
+"Canada / Standard" $12 method with free shipping over $150; ADMINs maintain
+them at `/admin/settings/shipping` — see `src/server/settings/tax-shipping-service.ts`).
 
 - `rates(parcel, shipFrom, shipTo) → ShippingOption[]` — every active
   `ShippingMethod` whose zone has a `ShippingZoneRegion` matching the

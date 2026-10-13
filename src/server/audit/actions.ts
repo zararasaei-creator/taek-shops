@@ -14,6 +14,10 @@ export const AUDIT_ACTIONS = {
   EMAIL_VERIFICATION_REQUESTED: "auth.email.verification_requested",
   EMAIL_VERIFIED: "auth.email.verified",
   USER_CREATED: "user.created",
+  USER_REGISTERED: "user.registered",
+  ADMIN_BOOTSTRAPPED: "auth.admin.bootstrapped",
+  USER_REGISTRATION_DUPLICATE: "user.registration.duplicate",
+  EMAIL_VERIFICATION_SEND_FAILED: "auth.email.verification_send_failed",
   USER_ROLE_CHANGED: "user.role.changed",
   USER_STATUS_CHANGED: "user.status.changed",
 
@@ -28,13 +32,18 @@ export const AUDIT_ACTIONS = {
   PRODUCT_UPDATED: "catalog.product.updated",
   PRODUCT_STATUS_CHANGED: "catalog.product.status_changed",
   PRODUCT_OPTIONS_CHANGED: "catalog.product.options_changed",
+  PRODUCT_OPTION_EXTENDED: "catalog.product.option_extended",
   VARIANT_CREATED: "catalog.variant.created",
   VARIANT_UPDATED: "catalog.variant.updated",
   VARIANT_PRICE_CHANGED: "catalog.variant.price_changed",
   VARIANT_ARCHIVED: "catalog.variant.archived",
+  VARIANT_MATRIX_GENERATED: "catalog.variant.matrix_generated",
   PRODUCT_IMAGE_ADDED: "catalog.image.added",
   PRODUCT_IMAGE_UPDATED: "catalog.image.updated",
   PRODUCT_IMAGE_REMOVED: "catalog.image.removed",
+  PRODUCT_IMAGE_REORDERED: "catalog.image.reordered",
+  PRODUCT_IMAGE_UPLOAD_CREATED: "catalog.image.upload_created",
+  PRODUCT_IMAGE_UPLOAD_REJECTED: "catalog.image.upload_rejected",
 
   // Inventory (Phase 4)
   INVENTORY_ADJUSTED: "inventory.adjusted",
@@ -52,6 +61,9 @@ export const AUDIT_ACTIONS = {
   // Orders (Phase 5 — inventory lifecycle wiring)
   ORDER_STATUS_CHANGED: "order.status.changed",
 
+  // Order management (Phase 8)
+  ORDER_FULFILLMENT_STATUS_CHANGED: "order.fulfillment_status.changed",
+
   // Checkout (Phase 6)
   ORDER_PLACED: "order.placed",
 
@@ -63,6 +75,29 @@ export const AUDIT_ACTIONS = {
   PAYMENT_LATE_SUCCESS: "payment.late_success",
   PAYMENT_WEBHOOK_UNHANDLED: "payment.webhook.unhandled",
   PAYMENT_WEBHOOK_STALE: "payment.webhook.stale",
+
+  // Abandoned-checkout reservation recovery (launch-prep milestone)
+  ORDER_EXPIRED: "order.expired",
+
+  // Admin cancellation of a PENDING order — provider-aware (see order-cancellation.ts)
+  ORDER_CANCEL_PRESERVED: "order.cancel.preserved",
+
+  // Tax & shipping configuration (Phase 11)
+  TAX_REGION_CREATED: "config.tax_region.created",
+  TAX_REGION_UPDATED: "config.tax_region.updated",
+  TAX_RATE_CREATED: "config.tax_rate.created",
+  TAX_RATE_UPDATED: "config.tax_rate.updated",
+  SHIPPING_ZONE_CREATED: "config.shipping_zone.created",
+  SHIPPING_ZONE_UPDATED: "config.shipping_zone.updated",
+  SHIPPING_ZONE_REGION_ADDED: "config.shipping_zone_region.added",
+  SHIPPING_ZONE_REGION_REMOVED: "config.shipping_zone_region.removed",
+  SHIPPING_METHOD_CREATED: "config.shipping_method.created",
+  SHIPPING_METHOD_UPDATED: "config.shipping_method.updated",
+
+  // Refunds (Phase 8)
+  REFUND_REQUESTED: "payment.refund.requested",
+  REFUND_SUCCEEDED: "payment.refund.succeeded",
+  REFUND_FAILED: "payment.refund.failed",
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

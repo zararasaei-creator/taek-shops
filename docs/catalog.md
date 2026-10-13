@@ -180,25 +180,57 @@ Next.js's built-in CSRF protection; the JSON API routes use `guardMutation`
   sub-categories) cannot be hard-deleted — the operator deactivates it instead.
 - Category cycles are rejected (`assertParentValid` walks the ancestry).
 
-## 7. Product images — foundation
+## 7. Product images (Phase 9 — delivered, local-only milestone)
 
 - **`ObjectStorage` interface** (`src/server/storage/object-storage.ts`):
   `put` / `get` / `delete` / `exists` / `publicUrl` / `createSignedUpload`.
-- **`LocalObjectStorage`** (dev/test) writes to `./storage/objects` (git-ignored)
-  and is served by `GET /api/media/[...key]` with path-traversal protection.
-- **`getObjectStorage()`** (`src/server/storage/index.ts`) is the single switch
-  point: it selects an S3-compatible backend when `S3_*` env is fully configured,
-  otherwise local. The S3 backend implementation is a later phase — the factory
-  currently logs and falls back to local when `S3_*` is set.
+- **`LocalObjectStorage`** (dev/test, no Docker required) writes to
+  `./storage/objects` (git-ignored) and is served by `GET /api/media/[...key]`
+  with path-traversal protection. No direct-upload support
+  (`createSignedUpload` returns `null`).
+- **`S3ObjectStorage`** (`src/server/storage/s3-object-storage.ts`) — real S3
+  or any S3-compatible service, including local MinIO
+  (`docker-compose.yml`'s `minio` service). Presigned PUT uploads via
+  `createSignedUpload`; `forcePathStyle: true` for MinIO compatibility. A
+  local MinIO URL is a development convenience only, never a production CDN.
+- **`getObjectStorage()`** (`src/server/storage/index.ts`) is the single
+  switch point: S3-compatible when `S3_*` is fully configured, otherwise
+  local.
 - `ProductImage.url` stores a **reference**, not binary data:
   `storage:<key>` for hosted objects (resolved via `ObjectStorage.publicUrl`) or
   an absolute `https://` URL for externally hosted images. Binary image data is
   never stored in PostgreSQL.
-- `image-service.ts` handles add / upload (type + size validation) / update /
-  remove / reorder / primary-image behaviour, with audit events.
-- **Remaining integration:** the S3-compatible `ObjectStorage` implementation,
-  signed direct-upload wiring, and the admin image-upload UI. The data model,
-  interface, dev backend, and API are in place.
+- **Byte-level validation** (`src/server/storage/image-sniff.ts`): every
+  upload's actual bytes are magic-number-sniffed before being stored — a
+  claimed content-type or file extension is never trusted. SVG is explicitly
+  rejected (an XML/text format, not a raster container, and a known inline-
+  XSS vector), checked ahead of the raster-format signatures.
+- **Staged direct upload** (S3-compatible backend only): the browser PUTs
+  bytes straight to storage via a presigned URL
+  (`createProductImageUploadSlot`); a `ProductImageUpload` row tracks the
+  staged, unvalidated object until `finalizeProductImageUpload` fetches it
+  back, verifies it for real, and only then creates the `ProductImage` row.
+  Never exposed to the storefront or admin list before that. An abandoned
+  staged upload is swept by `npm run images:cleanup-uploads`
+  (`src/server/storage/upload-cleanup.ts`) after 24h.
+- `image-service.ts` handles add / single-step upload (local backend) /
+  staged upload + finalize (S3-compatible backend) / update / remove /
+  reorder / primary-image behaviour, all with audit events. Deleting a
+  product (`deleteProductIfUnused`) cleans up its images' storage objects
+  after the DB delete commits, since a Postgres cascade can't reach object
+  storage.
+- **Admin UI** (`src/app/admin/catalog/products/[id]/image-panel.tsx`):
+  upload, reorder (move earlier/later), alt-text editing, set-primary,
+  delete.
+- **Storefront**: product detail page and the home grid render the primary
+  image via `next/image` (remote patterns restricted to the one configured
+  storage URL), falling back to a neutral "No image" placeholder
+  (`ImageWithFallback`) — never a broken-image icon, never an invented photo.
+- **Not yet wired**: variant-specific image swapping in the storefront
+  variant picker (the data model supports `ProductImage.variantId`; only
+  product-level images, `variantId: null`, are shown today). A real cloud
+  storage/CDN account for production remains a deployment-time decision, not
+  implemented here.
 
 ## 8. Schema change in Phase 4
 
@@ -287,9 +319,10 @@ also downloadable at `GET /api/admin/import/products/template`.
 | `cost_price`                                                        | —        | CAD dollars                                                                            |
 | `barcode`                                                           | —        | 4–64 chars; unique                                                                     |
 | `weight_grams`                                                      | —        | integer ≥ 0                                                                            |
-| `inventory_quantity`                                                | —        | integer ≥ 0; sets on-hand (writes a stock movement)                                    |
+| `inventory_on_hand`                                                 | —        | integer ≥ 0; sets on-hand (writes a stock movement). Alias: `inventory_quantity`       |
 | `option1_name` / `option1_value` … `option3_name` / `option3_value` | —        | Up to 3 option pairs; both of a pair required together; **not** limited to Size/Colour |
-| `image_url`                                                         | —        | absolute `https://` URL                                                                |
+| `image_url`                                                         | —        | absolute `https://` URL (product-level image)                                          |
+| `variant_image_url`                                                 | —        | absolute `https://` URL (image for this row's variant)                                 |
 
 The normalised option model means new option types (Material, Age Group, Style,
 …) work with no schema or code change — just new `optionN_*` values in the file.

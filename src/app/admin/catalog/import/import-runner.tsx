@@ -22,6 +22,7 @@ interface Preview {
   rows: PreviewRow[];
 }
 interface CommitResult {
+  importJobId: string;
   status: string;
   counts: { created: number; updated: number; skipped: number; failed: number };
   failedRows: { rowNumber: number; sku: string | null; errors: { message: string }[] }[];
@@ -39,6 +40,14 @@ export function ImportRunner() {
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [committed, setCommitted] = useState<CommitResult | null>(null);
+  // `committed.counts.failed` only counts failures `commitImport` found
+  // among rows it actually processed (status PENDING at commit time) — a
+  // row that already failed validation at PREVIEW time (e.g. a duplicate
+  // SKU within the file) is never touched by commit and so is invisible to
+  // that count. Captured here before `onCommit` clears `preview`, since the
+  // two counts are disjoint by construction (a row can fail at preview OR
+  // at commit, never counted at both) and together give the real total.
+  const [previewErrorCount, setPreviewErrorCount] = useState(0);
 
   async function onPreview(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -61,7 +70,9 @@ export function ImportRunner() {
         setPreview(null);
         return;
       }
-      setPreview(json as Preview);
+      const nextPreview = json as Preview;
+      setPreview(nextPreview);
+      setPreviewErrorCount(nextPreview.counts.error);
     } finally {
       setBusy(false);
     }
@@ -96,10 +107,10 @@ export function ImportRunner() {
         <input
           ref={fileRef}
           type="file"
-          accept=".csv,text/csv"
+          accept=".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
           required
           className="text-sm"
-          aria-label="CSV file"
+          aria-label="CSV or XLSX file"
         />
         <Button type="submit" disabled={busy}>
           {busy ? "Working…" : "Preview (dry-run)"}
@@ -179,23 +190,47 @@ export function ImportRunner() {
         </div>
       ) : null}
 
-      {committed ? (
-        <div className="mt-5 rounded-lg border border-green-300 bg-green-50 p-4 text-sm text-green-900">
-          Import {committed.status.toLowerCase()}: {committed.counts.created} created,{" "}
-          {committed.counts.updated} updated, {committed.counts.skipped} unchanged,{" "}
-          {committed.counts.failed} failed.
-          {committed.failedRows.length > 0 ? (
-            <ul className="mt-2 list-disc pl-5">
-              {committed.failedRows.map((row) => (
-                <li key={row.rowNumber}>
-                  Row {row.rowNumber} ({row.sku ?? "—"}):{" "}
-                  {row.errors.map((e) => e.message).join("; ")}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-      ) : null}
+      {committed
+        ? (() => {
+            // The real total: commit-time failures plus whatever already
+            // failed at preview (disjoint sets — see `previewErrorCount`'s
+            // doc comment above).
+            const totalFailed = committed.counts.failed + previewErrorCount;
+            return (
+              <div className="mt-5 rounded-lg border border-green-300 bg-green-50 p-4 text-sm text-green-900">
+                Import {committed.status.toLowerCase()}: {committed.counts.created} created,{" "}
+                {committed.counts.updated} updated, {committed.counts.skipped} unchanged,{" "}
+                {totalFailed} failed.
+                {committed.failedRows.length > 0 ? (
+                  <ul className="mt-2 list-disc pl-5">
+                    {committed.failedRows.map((row) => (
+                      <li key={row.rowNumber}>
+                        Row {row.rowNumber} ({row.sku ?? "—"}):{" "}
+                        {row.errors.map((e) => e.message).join("; ")}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                <p className="mt-3 flex gap-4">
+                  <a
+                    className="text-blue-700 hover:underline"
+                    href={`/admin/catalog/import/history/${committed.importJobId}`}
+                  >
+                    View details
+                  </a>
+                  {totalFailed > 0 ? (
+                    <a
+                      className="text-blue-700 hover:underline"
+                      href={`/api/admin/import/products/${committed.importJobId}/errors`}
+                    >
+                      Download error report (CSV)
+                    </a>
+                  ) : null}
+                </p>
+              </div>
+            );
+          })()
+        : null}
     </div>
   );
 }

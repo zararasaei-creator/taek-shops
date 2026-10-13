@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { Container } from "@/components/ui/container";
 import { getAuthContext } from "@/server/auth";
 import { LoginForm } from "@/app/login/login-form";
+import { defaultLanding } from "@/app/login/landing";
 
 export const metadata: Metadata = {
   title: "Sign in",
@@ -18,16 +19,18 @@ export default async function LoginPage({
   searchParams: Promise<{ next?: string }>;
 }) {
   const { next } = await searchParams;
-  const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : "/admin";
+  // `null` = no (valid) explicit destination: the landing page then depends on
+  // the role — customers go to their account, staff to the admin area.
+  const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : null;
 
   const context = await getAuthContext();
-  if (context) redirect(safeNext);
+  if (context) redirect(safeNext ?? defaultLanding(context.user.role));
 
   return (
     <Container className="flex flex-1 flex-col items-center justify-center gap-8 py-16">
       <div className="text-center">
         <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
-        <p className="mt-1 text-sm text-zinc-500">Taek Shops staff &amp; administration</p>
+        <p className="mt-1 text-sm text-zinc-500">Welcome back to Taek Shops</p>
       </div>
       <LoginForm next={safeNext} />
     </Container>

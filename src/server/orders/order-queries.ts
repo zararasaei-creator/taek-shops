@@ -1,7 +1,7 @@
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 
 import { prisma } from "@/server/db/client";
-import { hasPermission, type AuthUser } from "@/server/auth/authorization";
+import { hasPermission, requireUser, type AuthUser } from "@/server/auth/authorization";
 import { NotFoundError } from "@/server/catalog/errors";
 
 /**
@@ -30,6 +30,8 @@ const orderView = {
   placedAt: true,
   createdAt: true,
   userId: true,
+  // Refund amount only — never a provider id, card detail, or audit data.
+  payments: { select: { amountCents: true, refundedCents: true } },
   items: {
     orderBy: { createdAt: "asc" },
     select: {
@@ -81,5 +83,71 @@ export async function getOrderForConfirmation(
     throw new NotFoundError("Order", orderNumber);
   }
 
+  return order;
+}
+
+// ---------------------------------------------------------------------------
+// Customer order history ("My orders") — strict ownership, no staff bypass,
+// no "just placed" cookie bypass. A guest order (`userId` null) never appears
+// here, even if its `customerEmail` matches the signed-in user's own email —
+// attaching a guest order to an account happens nowhere in this codebase, on
+// purpose, and this query must not become the place that starts.
+// ---------------------------------------------------------------------------
+
+const myOrderListSelect = {
+  id: true,
+  orderNumber: true,
+  createdAt: true,
+  currency: true,
+  totalCents: true,
+  status: true,
+  paymentStatus: true,
+  fulfillmentStatus: true,
+} satisfies Prisma.OrderSelect;
+
+export type MyOrderListRow = Prisma.OrderGetPayload<{ select: typeof myOrderListSelect }>;
+
+export interface ListMyOrdersOptions {
+  skip?: number;
+  take?: number;
+}
+
+/** The signed-in user's own orders, newest first. Requires authentication. */
+export async function listMyOrders(
+  user: AuthUser | null | undefined,
+  options: ListMyOrdersOptions = {},
+  db: Db = prisma,
+): Promise<{ orders: MyOrderListRow[]; total: number }> {
+  const authed = requireUser(user);
+  const take = Math.min(Math.max(options.take ?? 10, 1), 50);
+  const skip = Math.max(options.skip ?? 0, 0);
+  const where: Prisma.OrderWhereInput = { userId: authed.id };
+
+  const [orders, total] = await Promise.all([
+    db.order.findMany({ where, select: myOrderListSelect, orderBy: { createdAt: "desc" }, skip, take }),
+    db.order.count({ where }),
+  ]);
+  return { orders, total };
+}
+
+export type MyOrderDetail = Prisma.OrderGetPayload<{ select: typeof orderView }>;
+
+/**
+ * One of the signed-in user's own orders, by order number. Never trusts a
+ * client-supplied customer id — ownership is checked against the
+ * server-resolved `authed.id` only. An order that exists but belongs to
+ * someone else 404s exactly like one that doesn't exist, so order numbers
+ * can't be probed to learn whether they belong to another customer.
+ */
+export async function getMyOrderDetail(
+  user: AuthUser | null | undefined,
+  orderNumber: string,
+  db: Db = prisma,
+): Promise<MyOrderDetail> {
+  const authed = requireUser(user);
+  const order = await db.order.findUnique({ where: { orderNumber }, select: orderView });
+  if (!order || order.userId !== authed.id) {
+    throw new NotFoundError("Order", orderNumber);
+  }
   return order;
 }

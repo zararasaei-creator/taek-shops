@@ -64,6 +64,8 @@ export const RATE_LIMITS = {
   login: { limit: 10, windowSeconds: 15 * 60 },
   passwordResetRequest: { limit: 5, windowSeconds: 60 * 60 },
   verificationRequest: { limit: 5, windowSeconds: 60 * 60 },
+  // Customer self-registration: applied per email AND per client IP.
+  registration: { limit: 10, windowSeconds: 60 * 60 },
 } as const;
 
 export type RateLimitedOperation = keyof typeof RATE_LIMITS;

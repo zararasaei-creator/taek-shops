@@ -24,7 +24,7 @@ describe("storefront home page", () => {
     expect(screen.getByText(/no products are available/i)).toBeInTheDocument();
   });
 
-  it("lists products with a formatted price", async () => {
+  it("lists products with a formatted price, falling back to a placeholder when there's no image", async () => {
     listPublicProducts.mockResolvedValue({
       products: [
         {
@@ -33,6 +33,7 @@ describe("storefront home page", () => {
           slug: "student-dobok",
           brand: { name: "Taek Basics", slug: "taek-basics" },
           priceRange: { minCents: 3999, maxCents: 4499 },
+          images: [],
         },
       ],
       total: 1,
@@ -40,5 +41,24 @@ describe("storefront home page", () => {
     render(await HomePage());
     expect(screen.getByRole("heading", { level: 2, name: "Student Dobok" })).toBeInTheDocument();
     expect(screen.getByText("$39.99 – $44.99")).toBeInTheDocument();
+    expect(screen.getByLabelText("No image available")).toBeInTheDocument();
+  });
+
+  it("renders the primary image when one exists", async () => {
+    listPublicProducts.mockResolvedValue({
+      products: [
+        {
+          id: "p1",
+          name: "Student Dobok",
+          slug: "student-dobok",
+          brand: { name: "Taek Basics", slug: "taek-basics" },
+          priceRange: { minCents: 3999, maxCents: 4499 },
+          images: [{ url: "http://fake-storage.local/products/p1/a.jpg", altText: "Front view", isPrimary: true }],
+        },
+      ],
+      total: 1,
+    });
+    render(await HomePage());
+    expect(screen.getByAltText("Front view")).toBeInTheDocument();
   });
 });

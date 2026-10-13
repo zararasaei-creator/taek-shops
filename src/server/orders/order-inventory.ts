@@ -1,10 +1,16 @@
-import { OrderStatus, type Prisma, type PrismaClient } from "@prisma/client";
+import {
+  OrderStatus,
+  PaymentStatus,
+  PaymentTransactionStatus,
+  Prisma,
+  type PrismaClient,
+} from "@prisma/client";
 
 import { prisma } from "@/server/db/client";
 import { requirePermission, type AuthUser } from "@/server/auth/authorization";
 import { recordAudit } from "@/server/audit/audit-service";
 import { AUDIT_ACTIONS } from "@/server/audit/actions";
-import { InvalidStateTransitionError, NotFoundError } from "@/server/catalog/errors";
+import { ConflictError, InvalidStateTransitionError, NotFoundError } from "@/server/catalog/errors";
 import {
   commitReservationTx,
   releaseReservationTx,
@@ -101,10 +107,53 @@ export interface OrderForInventory {
   lines: OrderLine[];
 }
 
+export interface LockedOrder {
+  id: string;
+  status: OrderStatus;
+  paymentStatus: PaymentStatus;
+}
+
+/**
+ * Acquire a row-level exclusive lock (`SELECT ... FOR UPDATE`) on an `Order`
+ * row — the abandoned-checkout reservation-recovery equivalent of
+ * `lockInventoryItem` (`src/server/inventory/inventory-lock.ts`), same
+ * pattern, same reasoning: a plain read gives no serialization guarantee
+ * under PostgreSQL's default READ COMMITTED isolation, so two transactions
+ * that each only READ before deciding what to write can both "win" a race
+ * that looks, from either one's point of view, like it checked first. This
+ * lock is what makes `startPayment`'s payment-creation claim and
+ * `applyOrderStatusTransitionTx`'s cancellation genuinely mutually
+ * exclusive per order — not merely unlikely to overlap.
+ *
+ * Exported for `src/server/orders/payment-service.ts`'s `startPayment` to
+ * acquire the SAME lock before claiming a payment attempt — without that,
+ * `startPayment`'s own transaction would only ever perform plain reads,
+ * which PostgreSQL does not block against another transaction's `FOR
+ * UPDATE`, and the two code paths would not actually serialize at all.
+ */
+export async function lockOrderRow(
+  tx: Pick<Tx, "$queryRaw">,
+  orderId: string,
+): Promise<LockedOrder | null> {
+  const rows = await tx.$queryRaw<LockedOrder[]>(Prisma.sql`
+    SELECT "id", "status", "paymentStatus" FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
+  `);
+  return rows[0] ?? null;
+}
+
 async function loadOrderForInventory(
-  tx: Pick<Tx, "order">,
+  tx: Tx,
   orderId: string,
 ): Promise<OrderForInventory> {
+  // Locks first — every caller of this function (every inventory-affecting
+  // status transition) now serializes per-order against any other
+  // transaction that also locks this row, including `startPayment`'s
+  // payment-creation claim (see `lockOrderRow`'s own comment). Re-reading
+  // via the ORM immediately after reflects whatever the lock acquisition
+  // itself already made current — this doesn't re-introduce a gap.
+  const locked = await lockOrderRow(tx, orderId);
+  if (!locked) throw new NotFoundError("Order", orderId);
+
   const order = await tx.order.findUnique({
     where: { id: orderId },
     select: {
@@ -270,6 +319,41 @@ export async function applyOrderStatusTransitionTx(
   }
 
   const effect = inventoryEffectForTransition(from, targetStatus);
+
+  // A `release` effect means PENDING -> CANCELLED before any payment has
+  // settled. THE INVARIANT enforced here, structurally, for EVERY caller
+  // (expiry sweep, admin cancel, payment-failure finalization): stock is
+  // never released while a payment against the order could still be payable
+  // or succeed. A `Payment` row that is not locally terminal
+  // (`FAILED`/`CANCELLED`) is exactly that possibility:
+  //  - `providerPaymentId: null` — an unresolved creation claim
+  //    (`startPayment` writes it BEFORE calling the provider): a real
+  //    PaymentIntent may exist, or be about to;
+  //  - a linked id — a provider PaymentIntent that nothing has yet
+  //    authoritatively confirmed cancelled. The only callers that may release
+  //    are those that first moved the row to a terminal status AFTER the
+  //    provider confirmed cancellation (`finalizeFailureTx`), so this never
+  //    blocks them. An admin cancel must go through the provider-aware flow
+  //    (`order-cancellation.ts`) — never straight to this function.
+  // Refuse rather than guess; the check runs under the Order row lock taken
+  // by `loadOrderForInventory`, so it cannot interleave with a claim commit.
+  if (effect === "release") {
+    const livePayment = await tx.payment.findFirst({
+      where: {
+        orderId,
+        status: { notIn: [PaymentTransactionStatus.FAILED, PaymentTransactionStatus.CANCELLED] },
+      },
+      select: { providerPaymentId: true },
+    });
+    if (livePayment) {
+      throw new ConflictError(
+        livePayment.providerPaymentId === null
+          ? `Order ${order.orderNumber} has a payment attempt in progress — refusing to cancel until it is reconciled.`
+          : `Order ${order.orderNumber} has a payment that the provider has not confirmed cancelled — refusing to release its stock.`,
+      );
+    }
+  }
+
   if (effect) await applyOpToLines(tx, order, effect);
 
   await tx.order.update({

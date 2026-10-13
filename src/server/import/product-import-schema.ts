@@ -3,7 +3,14 @@ import { ProductStatus } from "@prisma/client";
 import { MoneyError, parseAmountToCents } from "@/server/domain/money";
 import { isValidSlug, slugify } from "@/server/catalog/slug";
 import { MAX_PRICE_CENTS } from "@/lib/validation/catalog";
+import { IMPORT_COLUMN_ALIASES } from "@/server/import/product-import-columns";
 import type { RowError } from "@/server/import/errors";
+
+/** Canonical column -> the legacy header spellings that also feed it. */
+const ALIASES_FOR_CANONICAL: Record<string, string[]> = {};
+for (const [alias, canonical] of Object.entries(IMPORT_COLUMN_ALIASES)) {
+  (ALIASES_FOR_CANONICAL[canonical] ??= []).push(alias);
+}
 
 /**
  * Row-level parsing + normalisation + business validation for a product-import
@@ -25,9 +32,10 @@ export interface NormalizedProductRow {
   barcode?: string;
   weightGrams?: number;
   /** `undefined` => leave inventory unchanged (update) / 0 (create). */
-  inventoryQuantity?: number;
+  inventoryOnHand?: number;
   options: { name: string; value: string }[];
   imageUrl?: string;
+  variantImageUrl?: string;
 }
 
 const STATUS_MAP: Record<string, ProductStatus> = {
@@ -90,7 +98,15 @@ export function parseProductRow(values: Record<string, string>): {
   errors: RowError[];
 } {
   const errors: RowError[] = [];
-  const get = (key: string): string => (values[key] ?? "").trim();
+  const get = (key: string): string => {
+    const direct = (values[key] ?? "").trim();
+    if (direct) return direct;
+    for (const alias of ALIASES_FOR_CANONICAL[key] ?? []) {
+      const aliased = (values[alias] ?? "").trim();
+      if (aliased) return aliased;
+    }
+    return "";
+  };
 
   // --- SKU (update key) ---
   const sku = get("sku");
@@ -179,7 +195,7 @@ export function parseProductRow(values: Record<string, string>): {
     min: 0,
     max: 1_000_000,
   });
-  const inventoryQuantity = optionalInt(get("inventory_quantity"), "inventory_quantity", errors, {
+  const inventoryOnHand = optionalInt(get("inventory_on_hand"), "inventory_on_hand", errors, {
     min: 0,
     max: 1_000_000,
   });
@@ -229,21 +245,24 @@ export function parseProductRow(values: Record<string, string>): {
     options.push({ name, value });
   }
 
-  // --- Image ---
-  const rawImage = get("image_url");
-  let imageUrl: string | undefined;
-  if (rawImage) {
+  // --- Images (product-level + variant-level; https only, never downloaded) ---
+  const parseImage = (column: "image_url" | "variant_image_url"): string | undefined => {
+    const raw = get(column);
+    if (!raw) return undefined;
     try {
-      const url = new URL(rawImage);
+      const url = new URL(raw);
       if (url.protocol !== "https:") {
-        errors.push(err("image_url", "not_https", "Image URL must use https.", rawImage));
-      } else {
-        imageUrl = url.toString();
+        errors.push(err(column, "not_https", "Image URL must use https.", raw));
+        return undefined;
       }
+      return url.toString();
     } catch {
-      errors.push(err("image_url", "invalid_url", "Image URL is not a valid URL.", rawImage));
+      errors.push(err(column, "invalid_url", "Image URL is not a valid URL.", raw));
+      return undefined;
     }
-  }
+  };
+  const imageUrl = parseImage("image_url");
+  const variantImageUrl = parseImage("variant_image_url");
 
   if (errors.length > 0) return { errors };
 
@@ -262,9 +281,10 @@ export function parseProductRow(values: Record<string, string>): {
       costCents,
       barcode,
       weightGrams,
-      inventoryQuantity,
+      inventoryOnHand,
       options,
       imageUrl,
+      variantImageUrl,
     },
   };
 }

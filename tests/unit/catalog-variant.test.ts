@@ -3,7 +3,11 @@ import { UserRole } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ForbiddenError, UnauthenticatedError } from "@/server/auth/errors";
-import { CatalogValidationError, ConflictError } from "@/server/catalog/errors";
+import {
+  CatalogValidationError,
+  ConflictError,
+  ReferentialIntegrityError,
+} from "@/server/catalog/errors";
 import { createVariant } from "@/server/catalog/variant-service";
 import { createMockPrisma, looseMock, type MockPrisma } from "./helpers/mock-prisma";
 
@@ -14,13 +18,23 @@ interface Scenario {
   skuTaken?: boolean;
   signatureTaken?: boolean;
   productOptions?: { id: string; name: string }[];
+  /** Existing option name -> id, for options that already exist on the product. */
+  existingOptions?: Record<string, string>;
+  /** Other variants the product already has (excludes the one being created). */
+  otherVariantCount?: number;
 }
 
 function wire(db: MockPrisma, scenario: Scenario = {}) {
   db.product.findUnique.mockResolvedValue({ id: "prod_1" } as never);
   db.productOption.findMany.mockResolvedValue((scenario.productOptions ?? []) as never);
-  looseMock(db.productOption.upsert).mockImplementation(({ where }) =>
-    Promise.resolve({ id: `opt_${where.productId_name.name}`, _count: { values: 0 } }),
+  db.productVariant.count.mockResolvedValue(scenario.otherVariantCount ?? 0);
+  looseMock(db.productOption.findUnique).mockImplementation(({ where }) => {
+    const name = where.productId_name.name as string;
+    const existingId = scenario.existingOptions?.[name];
+    return Promise.resolve(existingId ? { id: existingId, _count: { values: 0 } } : null);
+  });
+  looseMock(db.productOption.create).mockImplementation(({ data }) =>
+    Promise.resolve({ id: `opt_${data.name}`, _count: { values: 0 } }),
   );
   looseMock(db.productOptionValue.upsert).mockImplementation(({ where }) =>
     Promise.resolve({ id: `val_${where.optionId_value.value}` }),
@@ -90,6 +104,33 @@ describe("createVariant", () => {
     await expect(
       createVariant(manager, "prod_1", { ...baseInput, optionSelections: [] }, db),
     ).rejects.toBeInstanceOf(CatalogValidationError);
+  });
+
+  it("allows selecting an existing option's value even when other variants exist", async () => {
+    wire(db, {
+      productOptions: [{ id: "opt_Size", name: "Size" }],
+      existingOptions: { Size: "opt_Size" },
+      otherVariantCount: 3,
+    });
+    const variant = await createVariant(
+      manager,
+      "prod_1",
+      { ...baseInput, optionSelections: [{ option: "Size", value: "L" }] },
+      db,
+    );
+    expect(variant.id).toBe("var_1");
+  });
+
+  it("refuses to implicitly create a brand-new option when the product already has other variants", async () => {
+    wire(db, { otherVariantCount: 1 });
+    await expect(
+      createVariant(
+        manager,
+        "prod_1",
+        { ...baseInput, optionSelections: [{ option: "Colour", value: "Red" }] },
+        db,
+      ),
+    ).rejects.toBeInstanceOf(ReferentialIntegrityError);
   });
 
   it("rejects compare-at price <= selling price", async () => {

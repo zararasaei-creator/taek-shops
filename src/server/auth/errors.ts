@@ -18,7 +18,8 @@ export type AuthErrorCode =
   | "invalid_token"
   | "self_role_change"
   | "privilege_escalation"
-  | "validation";
+  | "validation"
+  | "email_delivery_failed";
 
 export class AuthError extends Error {
   readonly code: AuthErrorCode;
@@ -83,6 +84,22 @@ export class WeakPasswordError extends AuthError {
 export class InvalidTokenError extends AuthError {
   constructor(internal?: string) {
     super("invalid_token", 400, "This link is invalid or has expired.", internal);
+  }
+}
+
+/**
+ * An email could not be requested from the transport. Only raised on flows
+ * where the caller is already authenticated (so nothing is enumerable) — the
+ * public flows stay generic by design.
+ */
+export class EmailSendFailedError extends AuthError {
+  constructor(internal?: string) {
+    super(
+      "email_delivery_failed",
+      502,
+      "We couldn't send the email just now. Your account is fine — please try again in a few minutes.",
+      internal,
+    );
   }
 }
 

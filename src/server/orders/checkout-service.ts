@@ -219,7 +219,12 @@ export async function placeOrder(
         data: {
           orderNumber,
           cartId: cart.id,
-          userId: cart.userId,
+          // Ownership comes from WHO IS PLACING THE ORDER NOW, never from a stale
+          // `cart.userId`: a cart first used while signed in, then continued as a
+          // guest after sign-out, must not attach the guest's order to that
+          // customer's history. (`findActiveCart` already re-points the cart at
+          // the signed-in user, so an authenticated order is always theirs.)
+          userId: identity.userId ?? null,
           customerEmail: input.email,
           customerPhone: input.shippingAddress.phone ?? null,
           status: OrderStatus.PENDING,
@@ -285,7 +290,7 @@ export async function placeOrder(
   await recordAudit(
     {
       action: AUDIT_ACTIONS.ORDER_PLACED,
-      actorUserId: cart.userId,
+      actorUserId: identity.userId ?? null,
       entityType: "Order",
       entityId: placed.order.id,
       metadata: {

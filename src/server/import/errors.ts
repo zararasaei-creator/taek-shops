@@ -7,11 +7,17 @@ export type ImportFileErrorCode =
   | "empty_file"
   | "file_too_large"
   | "too_many_rows"
+  | "too_many_columns"
+  | "too_many_archive_entries"
+  | "archive_entry_too_large"
+  | "archive_too_large"
   | "not_utf8"
   | "unparseable"
   | "missing_required_columns"
   | "duplicate_columns"
   | "no_data_rows"
+  | "multiple_worksheets"
+  | "unsupported_format"
   | "job_not_found"
   | "job_wrong_state";
 

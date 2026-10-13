@@ -28,6 +28,22 @@ export const loginSchema = z.object({
 });
 export type LoginInput = z.infer<typeof loginSchema>;
 
+/**
+ * Public customer registration. Exactly these four fields — Zod strips any
+ * other key (`role`, `status`, `emailVerifiedAt`, `permissions`, …) before
+ * the service sees the input, and `registerCustomer` takes no such parameters
+ * in the first place. Password policy (blocklist, personal info) is enforced by
+ * `hashPassword`; this is shape/length only.
+ */
+const nameSchema = z.string().trim().min(1, "Required.").max(100);
+export const registerSchema = z.object({
+  firstName: nameSchema,
+  lastName: nameSchema,
+  email: emailSchema,
+  password: passwordShapeSchema,
+});
+export type RegisterInput = z.infer<typeof registerSchema>;
+
 export const passwordResetRequestSchema = z.object({
   email: emailSchema,
 });

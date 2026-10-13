@@ -35,7 +35,7 @@ export const POST = route(async (request: Request) => {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const preview = await previewImport(
     actor,
-    { filename: file.name || "upload.csv", bytes, ...meta },
+    { filename: file.name || "upload.csv", bytes, contentType: file.type || null, ...meta },
     undefined,
   );
 

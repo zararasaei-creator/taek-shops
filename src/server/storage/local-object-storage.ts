@@ -20,7 +20,14 @@ export class LocalObjectStorage implements ObjectStorage {
   readonly name = "local";
   private readonly root: string;
 
-  constructor(root = path.join(process.cwd(), "storage", "objects")) {
+  /**
+   * `LOCAL_STORAGE_ROOT` (read directly, not through `serverEnv` — this is
+   * a narrow dev/test-only override) lets the dedicated e2e server
+   * (`playwright.config.ts`) point at its own isolated directory instead of
+   * the dev server's `./storage/objects`, so e2e-uploaded test images can
+   * never land in — or be cleaned up from — real dev-local storage.
+   */
+  constructor(root = process.env.LOCAL_STORAGE_ROOT || path.join(process.cwd(), "storage", "objects")) {
     this.root = root;
   }
 

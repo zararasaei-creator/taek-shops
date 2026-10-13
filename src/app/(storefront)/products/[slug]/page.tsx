@@ -1,11 +1,11 @@
 import Link from "next/link";
+import Image from "next/image";
 import { notFound } from "next/navigation";
 
 import { Container } from "@/components/ui/container";
 import { getPublicProductBySlug } from "@/server/catalog/catalog-queries";
-import { formatCents } from "@/server/domain/money";
-import { addToCartAction } from "@/app/(storefront)/actions";
-import { StoreForm } from "@/app/(storefront)/store-form";
+import { VariantPicker } from "@/app/(storefront)/products/[slug]/variant-picker";
+import { ImageWithFallback } from "@/components/ui/image-with-fallback";
 
 export const dynamic = "force-dynamic";
 
@@ -14,11 +14,26 @@ export default async function ProductPage({ params }: PageProps<"/products/[slug
   const product = await getPublicProductBySlug(slug);
   if (!product) notFound();
 
+  const primaryImage = product.images[0] ?? null;
+
   return (
     <Container className="py-12">
       <Link href="/" className="text-sm text-blue-600">
         ← Back to products
       </Link>
+      <div className="mt-4 max-w-md">
+        {primaryImage ? (
+          <Image
+            src={primaryImage.url}
+            alt={primaryImage.altText ?? product.name}
+            width={480}
+            height={480}
+            className="aspect-square w-full rounded-lg border border-zinc-200 object-cover dark:border-zinc-800"
+          />
+        ) : (
+          <ImageWithFallback />
+        )}
+      </div>
       <h1 className="mt-3 text-3xl font-semibold tracking-tight">{product.name}</h1>
       {product.brand ? <p className="text-zinc-500">{product.brand.name}</p> : null}
       {product.description ? (
@@ -26,34 +41,7 @@ export default async function ProductPage({ params }: PageProps<"/products/[slug
       ) : null}
 
       <h2 className="mt-10 text-lg font-medium">Choose an option</h2>
-      <ul className="mt-4 flex flex-col gap-4">
-        {product.variants.map((variant) => (
-          <li
-            key={variant.id}
-            className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800"
-            data-testid="variant-row"
-          >
-            <div>
-              <p className="font-medium">
-                {variant.options.length
-                  ? variant.options.map((o) => `${o.option}: ${o.value}`).join(" · ")
-                  : (variant.name ?? variant.sku)}
-              </p>
-              <p className="text-sm text-zinc-500">
-                {formatCents(variant.priceCents)} · SKU {variant.sku}
-              </p>
-            </div>
-            <StoreForm
-              action={addToCartAction}
-              submitLabel="Add to cart"
-              pendingLabel="Adding…"
-              variant="primary"
-              className="flex items-center gap-2"
-              hidden={{ variantId: variant.id, quantity: "1" }}
-            />
-          </li>
-        ))}
-      </ul>
+      <VariantPicker variants={product.variants} />
 
       <p className="mt-8 text-sm">
         <Link href="/cart" className="text-blue-600">

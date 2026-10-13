@@ -14,6 +14,10 @@ import { toCsv } from "@/server/import/cell-sanitize";
  * Options are NOT limited to Size/Colour: up to three `optionN_name` /
  * `optionN_value` pairs, each mapped onto the normalised
  * ProductOption/ProductOptionValue model.
+ *
+ * Images: `image_url` attaches to the PRODUCT; `variant_image_url` attaches to
+ * this row's VARIANT. Both are plain https references — nothing is downloaded.
+ * Hosted uploads (object storage) go through the admin image UI, not the CSV.
  */
 
 export interface ImportColumn {
@@ -97,7 +101,7 @@ export const PRODUCT_IMPORT_COLUMNS: ImportColumn[] = [
     example: "600",
   },
   {
-    key: "inventory_quantity",
+    key: "inventory_on_hand",
     required: false,
     description: "On-hand quantity to set (integer >= 0). Default: leave unchanged / 0 on create.",
     example: "120",
@@ -121,19 +125,42 @@ export const PRODUCT_IMPORT_COLUMNS: ImportColumn[] = [
   {
     key: "image_url",
     required: false,
-    description: "Absolute https URL of a product image.",
+    description: "Absolute https URL of a product-level image.",
     example: "https://cdn.example.com/uni-white.jpg",
+  },
+  {
+    key: "variant_image_url",
+    required: false,
+    description: "Absolute https URL of an image for THIS row's variant.",
+    example: "https://cdn.example.com/uni-white-140.jpg",
   },
 ];
 
 export const REQUIRED_IMPORT_COLUMNS = PRODUCT_IMPORT_COLUMNS.filter((c) => c.required).map(
   (c) => c.key,
 );
-export const KNOWN_IMPORT_COLUMNS = PRODUCT_IMPORT_COLUMNS.map((c) => c.key);
+
+/** The canonical headers, in order — exactly what the downloadable template emits. */
+export const CANONICAL_IMPORT_COLUMNS = PRODUCT_IMPORT_COLUMNS.map((c) => c.key);
+
+/**
+ * Legacy header spellings still accepted on upload. Each maps to its canonical
+ * key before validation, so older supplier files keep working. Never emitted by
+ * the template.
+ */
+export const IMPORT_COLUMN_ALIASES: Readonly<Record<string, string>> = {
+  inventory_quantity: "inventory_on_hand",
+};
+
+/** Every header the parser recognises = canonical columns + accepted aliases. */
+export const KNOWN_IMPORT_COLUMNS = [
+  ...CANONICAL_IMPORT_COLUMNS,
+  ...Object.keys(IMPORT_COLUMN_ALIASES),
+];
 
 /** Canonical CSV template with three synthetic example rows (no real data). */
 export function buildProductImportTemplate(): string {
-  const header = KNOWN_IMPORT_COLUMNS;
+  const header = CANONICAL_IMPORT_COLUMNS;
   const rows: (string | number)[][] = [
     [
       "UNI-STU-WHT-140",
@@ -156,6 +183,7 @@ export function buildProductImportTemplate(): string {
       "",
       "",
       "https://cdn.example.com/img/uni-stu-wht.jpg",
+      "https://cdn.example.com/img/uni-stu-wht-140.jpg",
     ],
     [
       "UNI-STU-WHT-160",
@@ -178,6 +206,7 @@ export function buildProductImportTemplate(): string {
       "",
       "",
       "https://cdn.example.com/img/uni-stu-wht.jpg",
+      "https://cdn.example.com/img/uni-stu-wht-160.jpg",
     ],
     [
       "BLT-COMP-BLK-4",
@@ -195,6 +224,7 @@ export function buildProductImportTemplate(): string {
       "45",
       "Size",
       "4",
+      "",
       "",
       "",
       "",

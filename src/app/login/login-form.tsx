@@ -1,16 +1,18 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { defaultLanding } from "@/app/login/landing";
 
 /**
  * Minimal credentials form. Fetches `/api/auth/session` first to obtain a CSRF
  * token, then POSTs to `/api/auth/login`. Deliberately unstyled beyond basics —
  * the real design-system form lands in Phase 4.
  */
-export function LoginForm({ next }: { next: string }) {
+export function LoginForm({ next }: { next: string | null }) {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -36,7 +38,8 @@ export function LoginForm({ next }: { next: string }) {
         setError(body.error?.message ?? "Sign in failed.");
         return;
       }
-      router.replace(next || "/admin");
+      const { user } = (await response.json()) as { user: { role: string } };
+      router.replace(next ?? defaultLanding(user.role));
       router.refresh();
     } catch {
       setError("Sign in failed. Please try again.");
@@ -76,6 +79,12 @@ export function LoginForm({ next }: { next: string }) {
           onChange={(event) => setPassword(event.target.value)}
           className="rounded-md border border-zinc-300 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-900"
         />
+        <Link
+          href="/password-reset"
+          className="self-end text-sm text-zinc-500 underline hover:text-zinc-700 dark:hover:text-zinc-300"
+        >
+          Forgot password?
+        </Link>
       </div>
       {error ? (
         <p role="alert" className="text-sm text-red-600">
@@ -85,6 +94,12 @@ export function LoginForm({ next }: { next: string }) {
       <Button type="submit" disabled={pending}>
         {pending ? "Signing in…" : "Sign in"}
       </Button>
+      <p className="text-center text-sm text-zinc-500">
+        New here?{" "}
+        <Link href="/register" className="underline" data-testid="login-create-account">
+          Create an account
+        </Link>
+      </p>
     </form>
   );
 }

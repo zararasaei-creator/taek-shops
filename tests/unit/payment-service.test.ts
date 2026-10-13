@@ -2,10 +2,12 @@
 import { OrderStatus, PaymentStatus } from "@prisma/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { NotFoundError, CatalogValidationError } from "@/server/catalog/errors";
+import { ConflictError, NotFoundError, CatalogValidationError } from "@/server/catalog/errors";
 import { __setPaymentGateway } from "@/server/domain/payments";
 import type { PaymentGateway, PaymentIntentView } from "@/server/domain/payments";
 import {
+  IDEMPOTENT_RECOVERY_MAX_AGE_MS,
+  claimEra,
   finalizeFailureTx,
   finalizeFromPaymentIntentTx,
   startPayment,
@@ -37,8 +39,11 @@ const gateway: PaymentGateway = {
   provider: "stripe",
   createPaymentIntent: vi.fn(),
   retrievePaymentIntent: vi.fn(),
+  cancelPaymentIntent: vi.fn(),
+  findPaymentIntentForOrder: vi.fn(),
   parseWebhook: vi.fn(),
   refund: vi.fn(),
+  retrieveRefund: vi.fn(),
 };
 
 let db: MockPrisma;
@@ -81,11 +86,16 @@ describe("startPayment", () => {
     );
   });
 
+  const lockedPending = () =>
+    db.$queryRaw.mockResolvedValue([{ id: "o1", status: OrderStatus.PENDING, paymentStatus: "UNPAID" }] as never);
+
   it("derives the charge amount from order.totalCents and creates one intent", async () => {
     db.order.findUnique.mockResolvedValue(pendingOrder as never);
     db.payment.findUnique.mockResolvedValue(null as never);
     db.payment.create.mockResolvedValue({} as never);
+    db.payment.updateMany.mockResolvedValue({ count: 1 } as never);
     db.auditLog.create.mockResolvedValue({} as never);
+    lockedPending();
     vi.mocked(gateway.createPaymentIntent).mockResolvedValue(
       pi({ status: "requires_payment_method" }),
     );
@@ -97,6 +107,63 @@ describe("startPayment", () => {
     expect(arg.amountCents).toBe(6850);
     expect(arg.currency).toBe("cad");
     expect(arg.idempotencyKey).toBe("pi-create-o1");
+  });
+
+  it("commits the durable claim BEFORE any provider call, and the provider call runs outside every transaction", async () => {
+    const events: string[] = [];
+    db.order.findUnique.mockResolvedValue(pendingOrder as never);
+    db.payment.findUnique.mockResolvedValue(null as never);
+    db.payment.create.mockImplementation((() => {
+      events.push("claim_written");
+      return Promise.resolve({});
+    }) as never);
+    db.payment.updateMany.mockResolvedValue({ count: 1 } as never);
+    db.auditLog.create.mockResolvedValue({} as never);
+    lockedPending();
+    let inTransaction = false;
+    const inline = db.$transaction.getMockImplementation() as (arg: unknown) => unknown;
+    db.$transaction.mockImplementation(((arg: unknown) => {
+      inTransaction = true;
+      events.push("tx_open");
+      return Promise.resolve(inline(arg)).finally(() => {
+        inTransaction = false;
+        events.push("tx_closed");
+      });
+    }) as never);
+    vi.mocked(gateway.createPaymentIntent).mockImplementation((() => {
+      events.push(inTransaction ? "provider_call_INSIDE_tx" : "provider_call");
+      return Promise.resolve(pi({ status: "requires_payment_method" }));
+    }) as never);
+
+    await startPayment("TS-1", { justPlaced: true }, {}, db);
+
+    expect(events.indexOf("claim_written")).toBeGreaterThan(-1);
+    expect(events.indexOf("claim_written")).toBeLessThan(events.indexOf("provider_call"));
+    expect(events).not.toContain("provider_call_INSIDE_tx");
+    expect(events.indexOf("tx_closed")).toBeLessThan(events.indexOf("provider_call"));
+  });
+
+  it("aborts BEFORE any provider call when the order is no longer payable once the lock is held (expiry/cancellation won first)", async () => {
+    db.order.findUnique.mockResolvedValue(pendingOrder as never);
+    db.payment.findUnique.mockResolvedValue(null as never);
+    db.$queryRaw.mockResolvedValue([{ id: "o1", status: OrderStatus.CANCELLED, paymentStatus: "UNPAID" }] as never);
+
+    await expect(startPayment("TS-1", { justPlaced: true }, {}, db)).rejects.toBeInstanceOf(
+      CatalogValidationError,
+    );
+    expect(db.payment.create).not.toHaveBeenCalled();
+    expect(gateway.createPaymentIntent).not.toHaveBeenCalled();
+  });
+
+  it("fails closed — no provider call — on an unresolved claim older than the idempotency recovery window", async () => {
+    db.order.findUnique.mockResolvedValue(pendingOrder as never);
+    db.payment.findUnique.mockResolvedValue({
+      providerPaymentId: null,
+      createdAt: new Date(Date.now() - IDEMPOTENT_RECOVERY_MAX_AGE_MS - 1000),
+    } as never);
+
+    await expect(startPayment("TS-1", { justPlaced: true }, {}, db)).rejects.toBeInstanceOf(ConflictError);
+    expect(gateway.createPaymentIntent).not.toHaveBeenCalled();
   });
 
   it("reuses an existing live PaymentIntent instead of creating a second", async () => {
@@ -116,6 +183,19 @@ describe("startPayment", () => {
     await expect(startPayment("TS-1", { justPlaced: false }, {}, db)).rejects.toBeInstanceOf(
       NotFoundError,
     );
+  });
+});
+
+describe("claimEra", () => {
+  const since = new Date("2026-10-06T00:00:00Z");
+  it("is legacy only when created before the configured boundary", () => {
+    expect(claimEra(new Date("2026-10-05T23:59:59Z"), since)).toBe("legacy");
+    expect(claimEra(new Date("2026-10-06T00:00:00Z"), since)).toBe("post_claim");
+    expect(claimEra(new Date("2026-10-07T00:00:00Z"), since)).toBe("post_claim");
+  });
+  it("fails closed when the boundary is not configured — never asserts no pre-claim orders exist", () => {
+    expect(claimEra(new Date("2020-01-01T00:00:00Z"), null)).toBe("unknown");
+    expect(claimEra(new Date("2099-01-01T00:00:00Z"), null)).toBe("unknown");
   });
 });
 

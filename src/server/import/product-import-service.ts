@@ -19,7 +19,8 @@ import { ensureOptionValueTx } from "@/server/catalog/option-service";
 import { setOnHandTx } from "@/server/inventory/inventory-service";
 import type { CatalogTxClient } from "@/server/catalog/tx";
 import { ImportFileError, type RowError } from "@/server/import/errors";
-import { parseCsv, type ParsedRow } from "@/server/import/csv-parser";
+import { type ParsedRow } from "@/server/import/csv-parser";
+import { resolveRowSource } from "@/server/import/row-source";
 import {
   KNOWN_IMPORT_COLUMNS,
   REQUIRED_IMPORT_COLUMNS,
@@ -88,12 +89,13 @@ function sha256(bytes: Uint8Array): string {
 
 export async function previewImport(
   actor: Actor,
-  file: { filename: string; bytes: Uint8Array } & Meta,
+  file: { filename: string; bytes: Uint8Array; contentType?: string | null } & Meta,
   db: Db = prisma,
 ): Promise<ImportPreview> {
   const authed = requirePermission(actor, "import.run");
   const fileHash = sha256(file.bytes);
-  const table = parseCsv(file.bytes, fileHash);
+  const rowSource = resolveRowSource(file.filename, file.contentType);
+  const table = await rowSource.parse(file.bytes, fileHash);
 
   const missingRequired = REQUIRED_IMPORT_COLUMNS.filter((c) => !table.columns.includes(c));
   if (missingRequired.length > 0) {
@@ -111,6 +113,7 @@ export async function previewImport(
 
   const seenSkus = new Map<string, number>();
   const productNameBySlug = new Map<string, string>();
+  const catalogCache = new Map<string, ExistingProductShape | null>();
   const previewRows: PreviewRow[] = [];
   const stagedRows: {
     rowNumber: number;
@@ -123,7 +126,18 @@ export async function previewImport(
   }[] = [];
 
   for (const row of table.rows) {
-    const { data, errors } = parseProductRow(row.values);
+    const { data, errors: schemaErrors } = parseProductRow(row.values);
+    // A `RowSource`-level hard failure (currently: a genuine XLSX formula
+    // cell — see `xlsx-parser.ts`) always fails the row, even if
+    // `parseProductRow` itself would have accepted it (e.g. the formula was
+    // in an optional field) — explicitly rejected, never silently reduced
+    // to a blank optional value with nothing but a soft warning. `data` is
+    // deliberately NOT cleared here: if `parseProductRow` still produced it
+    // (the formula wasn't in a field that fails on its own), the row's SKU
+    // etc. remain visible in the error report instead of being lost.
+    const errors = row.formatErrors && row.formatErrors.length > 0
+      ? [...row.formatErrors, ...schemaErrors]
+      : schemaErrors;
     const warnings: string[] = [];
     if (row.neutralizedColumns.length > 0) {
       warnings.push(
@@ -154,6 +168,21 @@ export async function previewImport(
         );
       } else if (!priorName) {
         productNameBySlug.set(data.productSlug, data.productName);
+      }
+
+      // Flag option values that aren't among a pre-existing product's declared
+      // values for that option — usually a spelling slip in the spreadsheet.
+      if (data.options.length > 0) {
+        const shape = await getExistingProductShape(db, data.productSlug, catalogCache);
+        for (const option of data.options) {
+          const known = shape?.options.get(option.name.toLowerCase());
+          if (known && !known.has(option.value.toLowerCase())) {
+            warnings.push(
+              `"${option.value}" is a new value for the existing option "${option.name}" on ` +
+                `"${data.productName}" — it will be created. Check for a typo.`,
+            );
+          }
+        }
       }
     }
 
@@ -204,7 +233,7 @@ export async function previewImport(
   const job = await db.importJob.create({
     data: {
       type: "PRODUCT",
-      sourceFormat: "CSV",
+      sourceFormat: rowSource.format === "xlsx" ? "XLSX" : "CSV",
       originalFilename: file.filename.slice(0, 255),
       fileHash,
       status: ImportJobStatus.VALIDATED,
@@ -474,17 +503,33 @@ async function applyRow(
     }
   }
 
-  // Resolve option selections for this variant.
-  const joinRows: { optionId: string; optionValueId: string }[] = [];
-  for (const option of data.options) {
-    joinRows.push(await ensureOptionValueTx(tx, product.id, option.name, option.value));
-  }
-  const signature = optionSignature(joinRows.map((r) => r.optionValueId));
-
   const existingVariant = await tx.productVariant.findUnique({
     where: { sku: data.sku },
     include: { inventoryItem: true },
   });
+
+  // A brand-new option (one this product has never seen) is only safe to
+  // create implicitly here when there's no OTHER existing variant that would
+  // end up missing a value for it. Re-importing a row for an existing variant
+  // doesn't count itself as "other". Otherwise the row fails with a clear
+  // error pointing at the admin's "extend options" operation, which backfills
+  // every existing variant atomically.
+  const otherVariantCount = await tx.productVariant.count({
+    where: {
+      productId: product.id,
+      ...(existingVariant ? { id: { not: existingVariant.id } } : {}),
+    },
+  });
+  const allowNewOption = otherVariantCount === 0;
+
+  // Resolve option selections for this variant.
+  const joinRows: { optionId: string; optionValueId: string }[] = [];
+  for (const option of data.options) {
+    joinRows.push(
+      await ensureOptionValueTx(tx, product.id, option.name, option.value, { allowNewOption }),
+    );
+  }
+  const signature = optionSignature(joinRows.map((r) => r.optionValueId));
 
   let variantId: string;
   let variantCreated = false;
@@ -494,19 +539,25 @@ async function applyRow(
       throw new Error(`SKU ${data.sku} already belongs to a different product.`);
     }
     variantId = existingVariant.id;
+    // Update-by-SKU: only touch a field the row actually provides. A blank cell
+    // is "no opinion" and must never null out existing data (price is always
+    // required, so it is always compared).
     const patch: Prisma.ProductVariantUpdateInput = {};
     if (existingVariant.priceCents !== data.priceCents) patch.priceCents = data.priceCents;
-    if ((existingVariant.compareAtPriceCents ?? null) !== (data.compareAtPriceCents ?? null)) {
-      patch.compareAtPriceCents = data.compareAtPriceCents ?? null;
+    if (
+      data.compareAtPriceCents !== undefined &&
+      data.compareAtPriceCents !== existingVariant.compareAtPriceCents
+    ) {
+      patch.compareAtPriceCents = data.compareAtPriceCents;
     }
-    if ((existingVariant.costCents ?? null) !== (data.costCents ?? null)) {
-      patch.costCents = data.costCents ?? null;
+    if (data.costCents !== undefined && data.costCents !== existingVariant.costCents) {
+      patch.costCents = data.costCents;
     }
-    if ((existingVariant.barcode ?? null) !== (data.barcode ?? null)) {
-      patch.barcode = data.barcode ?? null;
+    if (data.barcode !== undefined && data.barcode !== existingVariant.barcode) {
+      patch.barcode = data.barcode;
     }
-    if ((existingVariant.weightGrams ?? null) !== (data.weightGrams ?? null)) {
-      patch.weightGrams = data.weightGrams ?? null;
+    if (data.weightGrams !== undefined && data.weightGrams !== existingVariant.weightGrams) {
+      patch.weightGrams = data.weightGrams;
     }
     if (Object.keys(patch).length > 0) {
       await tx.productVariant.update({ where: { id: variantId }, data: patch });
@@ -546,8 +597,8 @@ async function applyRow(
   }
 
   // Inventory (absolute set).
-  if (data.inventoryQuantity !== undefined) {
-    const moved = await setOnHandTx(tx, variantId, data.inventoryQuantity, {
+  if (data.inventoryOnHand !== undefined) {
+    const moved = await setOnHandTx(tx, variantId, data.inventoryOnHand, {
       type: variantCreated ? StockMovementType.INITIAL : StockMovementType.ADJUSTMENT,
       reason: "CSV import",
       reference: `import:${importJobId}`,
@@ -556,10 +607,10 @@ async function applyRow(
     if (moved) changed = true;
   }
 
-  // Image (external URL only; add once).
+  // Product-level image (external URL only; add once).
   if (data.imageUrl) {
     const existingImage = await tx.productImage.findFirst({
-      where: { productId: product.id, url: data.imageUrl },
+      where: { productId: product.id, variantId: null, url: data.imageUrl },
       select: { id: true },
     });
     if (!existingImage) {
@@ -570,6 +621,27 @@ async function applyRow(
           url: data.imageUrl,
           position: imageCount,
           isPrimary: imageCount === 0,
+        },
+      });
+      changed = true;
+    }
+  }
+
+  // Variant-level image (external URL only; add once, never the product primary).
+  if (data.variantImageUrl) {
+    const existingVariantImage = await tx.productImage.findFirst({
+      where: { productId: product.id, variantId, url: data.variantImageUrl },
+      select: { id: true },
+    });
+    if (!existingVariantImage) {
+      const imageCount = await tx.productImage.count({ where: { productId: product.id } });
+      await tx.productImage.create({
+        data: {
+          productId: product.id,
+          variantId,
+          url: data.variantImageUrl,
+          position: imageCount,
+          isPrimary: false,
         },
       });
       changed = true;
@@ -634,6 +706,36 @@ async function lookupExistingSkus(
     select: { sku: true },
   });
   return new Set(found.map((v) => v.sku.toLowerCase()));
+}
+
+interface ExistingProductShape {
+  /** lower-cased option name -> set of lower-cased existing values. */
+  options: Map<string, Set<string>>;
+}
+
+/** Cached, per-slug lookup of an already-existing product's declared options. */
+async function getExistingProductShape(
+  db: Pick<PrismaClient, "product">,
+  slug: string,
+  cache: Map<string, ExistingProductShape | null>,
+): Promise<ExistingProductShape | null> {
+  if (cache.has(slug)) return cache.get(slug)!;
+  const product = await db.product.findUnique({
+    where: { slug },
+    select: { options: { select: { name: true, values: { select: { value: true } } } } },
+  });
+  const shape: ExistingProductShape | null = product
+    ? {
+        options: new Map(
+          product.options.map((option) => [
+            option.name.toLowerCase(),
+            new Set(option.values.map((v) => v.value.toLowerCase())),
+          ]),
+        ),
+      }
+    : null;
+  cache.set(slug, shape);
+  return shape;
 }
 
 export type { ParsedRow };

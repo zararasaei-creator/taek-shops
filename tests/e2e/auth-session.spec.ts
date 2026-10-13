@@ -1,23 +1,25 @@
 import { expect, test } from "@playwright/test";
 
+import { E2E_ORIGIN } from "./helpers/base-url";
+import { authSessionEmail, PHASE8_PASSWORD, readPersistedRunId } from "./helpers/phase8-fixtures";
+
 /**
- * Full HTTP sign-in → session → logout loop against the running app + a live
- * database. Requires a seeded admin: set `E2E_ADMIN_EMAIL` / `E2E_ADMIN_PASSWORD`
- * (matching a `db:seed` with `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`). Skips
- * cleanly when they are absent so the default suite stays DB-free.
+ * Full HTTP sign-in → session → logout loop against the dedicated e2e server
+ * + the isolated `TEST_DATABASE_URL`. Signs in as a MANAGER account created
+ * only in that database by `global-setup.ts` (`authSessionEmail`, real
+ * Argon2id hash via `hashPassword`) — not the `db:seed` admin, which lives in
+ * the application's own database and was never reachable here safely.
  *
  * Resolves the Phase 5 pre-work item "add the automated e2e for the
  * authenticated flow"; the same loop was verified manually in the Phase 5
- * pre-flight.
+ * pre-flight, and again by the user through the browser in Phase 8.
  */
-const email = process.env.E2E_ADMIN_EMAIL;
-const password = process.env.E2E_ADMIN_PASSWORD;
+const email = authSessionEmail(readPersistedRunId());
+const password = PHASE8_PASSWORD;
 
 test.describe("authenticated session lifecycle", () => {
-  test.skip(!email || !password, "set E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD to run");
-
   test("sign in, use an admin API, sign out, lose access", async ({ request }) => {
-    const origin = "http://localhost:3000";
+    const origin = E2E_ORIGIN;
 
     const bootstrap = await request.get("/api/auth/session");
     const csrf = (await bootstrap.json()).csrfToken as string;
@@ -39,7 +41,7 @@ test.describe("authenticated session lifecycle", () => {
       data: { email, password },
     });
     expect(ok.ok()).toBeTruthy();
-    expect((await ok.json()).user.email).toBe(email!.toLowerCase());
+    expect((await ok.json()).user.email).toBe(email.toLowerCase());
 
     // session now reports the user, and admin APIs work
     expect((await request.get("/api/auth/session")).ok()).toBeTruthy();

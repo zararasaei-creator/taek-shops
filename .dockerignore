@@ -1,0 +1,78 @@
+# Docker build context exclusions. The goal is a small context that can never carry
+# a secret, a local email preview, a backup, or a test/dev artifact into an image.
+
+# --- secrets & environment (templates like .env.example are not needed either) ---
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+.aws/
+.npmrc
+
+# --- local data: email previews, object storage, database dumps/backups ----------
+.local/
+.e2e-storage-objects/
+storage/
+data/
+postgres-data/
+backups/
+backup/
+*.sql
+*.dump
+*.bak
+*.sqlite
+*.db
+
+# --- version control, editors, assistants -----------------------------------------
+.git/
+.gitattributes
+.gitignore
+.claude/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- build output & dependencies (rebuilt inside the image) ------------------------
+node_modules/
+.next/
+.next-e2e/
+out/
+build/
+dist/
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# --- tests & test artifacts ----------------------------------------------------------
+tests/
+test-results/
+playwright-report/
+playwright/.cache/
+coverage/
+vitest.config.mts
+vitest.integration.config.mts
+playwright.config.ts
+
+# --- CI orchestration (not part of the runtime image) ---------------------------------
+ci/
+scripts/ci/
+scripts/db/
+
+# --- docs, logs, dev tooling ------------------------------------------------------------
+docs/
+infra/
+*.log
+npm-debug.log*
+.prettierrc.json
+.prettierignore
+eslint.config.mjs
+README.md
+AGENTS.md
+CLAUDE.md
+docker-compose.yml
+Dockerfile
+.dockerignore

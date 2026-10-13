@@ -14,6 +14,7 @@ import {
 import { normalizeSlug } from "@/server/catalog/slug";
 import type { CatalogTxClient } from "@/server/catalog/tx";
 import { createVariantTx } from "@/server/catalog/variant-service";
+import { deleteImageStorageObjectsForReferences } from "@/server/catalog/image-service";
 import {
   productCreateSchema,
   productUpdateSchema,
@@ -378,7 +379,12 @@ export async function deleteProductIfUnused(
   const authed = requirePermission(actor, "catalog.write");
   const product = await db.product.findUnique({
     where: { id },
-    select: { id: true, name: true, _count: { select: { orderItems: true } } },
+    select: {
+      id: true,
+      name: true,
+      _count: { select: { orderItems: true } },
+      images: { select: { url: true } },
+    },
   });
   if (!product) throw new NotFoundError("Product", id);
   if (product._count.orderItems > 0) {
@@ -388,6 +394,11 @@ export async function deleteProductIfUnused(
   }
 
   await db.product.delete({ where: { id } });
+  // The DB cascade already removed the ProductImage rows; a Postgres
+  // cascade can't reach object storage, so that cleanup happens here,
+  // AFTER the delete has actually committed — never before, so a rolled-
+  // back delete never orphans a still-referenced storage object.
+  await deleteImageStorageObjectsForReferences(product.images.map((image) => image.url));
   await recordAudit(
     {
       action: AUDIT_ACTIONS.PRODUCT_STATUS_CHANGED,

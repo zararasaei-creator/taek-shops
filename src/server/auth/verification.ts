@@ -26,7 +26,7 @@ import {
 } from "@/server/auth/rate-limit";
 import { revokeAllSessionsForUser } from "@/server/auth/session";
 import { generateToken, hashToken } from "@/server/auth/tokens";
-import { mailer as defaultMailer, type Mailer } from "@/server/auth/mailer";
+import { getMailer, type Mailer } from "@/server/auth/mailer";
 
 /**
  * Password-reset and email-verification foundations, built on the Phase 2
@@ -104,7 +104,7 @@ export async function requestPasswordReset(
 ): Promise<void> {
   const db = deps.db ?? prisma;
   const limiter = deps.limiter ?? defaultLimiter;
-  const mailer = deps.mailer ?? defaultMailer;
+  const mailer = deps.mailer ?? getMailer();
   const email = normalizeEmail(input.email);
 
   for (const key of [`email:${email}`, `ip:${input.ipAddress ?? "unknown"}`]) {
@@ -170,7 +170,7 @@ export async function requestEmailVerification(
 ): Promise<void> {
   const db = deps.db ?? prisma;
   const limiter = deps.limiter ?? defaultLimiter;
-  const mailer = deps.mailer ?? defaultMailer;
+  const mailer = deps.mailer ?? getMailer();
   const email = normalizeEmail(input.email);
 
   for (const key of [`email:${email}`, `ip:${input.ipAddress ?? "unknown"}`]) {

@@ -135,3 +135,23 @@ export function Select({
     </label>
   );
 }
+
+export function Checkbox({
+  label,
+  name,
+  defaultChecked,
+  help,
+}: {
+  label: string;
+  name: string;
+  defaultChecked?: boolean;
+  help?: string;
+}) {
+  return (
+    <label className="flex items-center gap-2 text-sm">
+      <input type="checkbox" name={name} defaultChecked={defaultChecked} />
+      <span className="font-medium">{label}</span>
+      {help ? <span className="text-xs text-zinc-500">{help}</span> : null}
+    </label>
+  );
+}

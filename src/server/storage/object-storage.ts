@@ -63,6 +63,17 @@ export function productImageKey(productId: string, filename: string): string {
   return `products/${productId}/${Date.now()}-${random}.${ext}`;
 }
 
+/**
+ * A staging key for a direct upload that hasn't been validated/finalized
+ * yet — deliberately under its own `staging/` prefix, distinct from
+ * `productImageKey`'s `products/` prefix, so a swept/abandoned upload can
+ * never collide with or be mistaken for a real, finalized image key.
+ */
+export function stagingImageKey(productId: string): string {
+  const random = Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+  return `staging/products/${productId}/${Date.now()}-${random}`;
+}
+
 /** Reject keys that could escape the storage root. */
 export function isSafeStorageKey(key: string): boolean {
   return (

@@ -1,5 +1,8 @@
 # Local development services only. Not a production deployment manifest.
 # Requires POSTGRES_PASSWORD to be set in your local .env (see .env.example).
+# MinIO requires S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY / S3_BUCKET to be set
+# in your local .env too (generate your own local-only dev values — never
+# real/production credentials; see .env.example).
 
 services:
   postgres:
@@ -20,5 +23,74 @@ services:
       timeout: 5s
       retries: 5
 
+  # Local S3-compatible object storage (Phase 9) for product images. A
+  # development convenience only — its URLs are NOT a production CDN (see
+  # `src/server/storage/s3-object-storage.ts` and the roadmap for that
+  # explicit distinction). Entirely separate from `postgres` above: its own
+  # service, its own named volume — adding/removing this service never
+  # touches the Postgres container or `postgres-data`.
+  # Docker Hub delisted the free MinIO community images in 2025 (AGPL
+  # licensing change) — `quay.io/minio/*` is MinIO's own registry and the
+  # correct source now, not `minio/minio`/`minio/mc`.
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: taek-shops-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID must be set in .env (local dev value only)}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY must be set in .env (local dev value only)}
+    command: server /data --console-address ":9001"
+    ports:
+      - "${S3_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # One-shot init: creates the app's bucket on first start, idempotently,
+  # and applies the anonymous-access policy below. Exits after running —
+  # `docker compose up` reports it as done, not failed. Never touches
+  # `postgres` or its volume.
+  #
+  # **Private staging, enforced at the storage layer, not just by the app
+  # never linking to staged keys**: `object-storage.ts`'s two key
+  # generators put every object under one of two disjoint top-level
+  # prefixes — `productImageKey` under `products/…` (finalized, validated,
+  # meant to be publicly viewable) and `stagingImageKey` under
+  # `staging/products/…` (uploaded but not yet byte-validated by
+  # `finalizeProductImageUpload`). The anonymous bucket policy below grants
+  # `s3:GetObject` ONLY under `products/*` and grants no `s3:ListBucket` at
+  # all — so an anonymous request can never enumerate the bucket, and can
+  # never read a staged object even by its exact key. This was previously
+  # `mc anonymous set download`, which granted anonymous `GetObject` +
+  # `ListBucket` on the WHOLE bucket, including `staging/*` — a real gap
+  # against the Phase 9 "private staging" requirement, found and fixed
+  # during a pre-rollout review (see the roadmap). Authenticated app
+  # operations (`storage.get()`/`put()`/`delete()`, presigned uploads) all
+  # use the MinIO root credentials and are governed by IAM, not this
+  # anonymous bucket policy — none of them are affected by this change.
+  minio-init:
+    image: quay.io/minio/mc:latest
+    container_name: taek-shops-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      S3_BUCKET: ${S3_BUCKET:?S3_BUCKET must be set in .env}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID must be set in .env}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY must be set in .env}
+    entrypoint: >
+      sh -c "
+      mc alias set local http://minio:9000 \"$$S3_ACCESS_KEY_ID\" \"$$S3_SECRET_ACCESS_KEY\" &&
+      mc mb -p local/\"$$S3_BUCKET\" &&
+      printf '{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":[\"*\"]},\"Action\":[\"s3:GetObject\"],\"Resource\":[\"arn:aws:s3:::%s/products/*\"]}]}' \"$$S3_BUCKET\" > /tmp/anon-policy.json &&
+      mc anonymous set-json /tmp/anon-policy.json local/\"$$S3_BUCKET\"
+      "
+
 volumes:
   postgres-data:
+  minio-data:

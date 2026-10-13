@@ -14,10 +14,32 @@ import {
   placeOrderInput,
   type TestShippingConfig,
 } from "./helpers/checkout";
-import { FakeStripeGateway, makeEvent, signEvent } from "./helpers/payments";
+import {
+  FakeStripeGateway,
+  cleanupOwnedWebhookEvents,
+  makeEvent as makeRawEvent,
+  signEvent,
+} from "./helpers/payments";
 
 let cfg: TestShippingConfig;
 let gateway: FakeStripeGateway;
+
+/**
+ * `WebhookEvent` rows have no relation back to a test fixture (no order id, no
+ * namespaced prefix) — the only safe way to clean up exactly what THIS run
+ * created is to record every event id this file generates and delete only
+ * those, by exact id. Never widen this to a prefix or a blanket `deleteMany`:
+ * the webhook table is shared with real application traffic, and an
+ * unscoped delete here previously erased unrelated webhook history.
+ */
+const ownedWebhookEventIds = new Set<string>();
+
+/** Wraps `makeEvent` so every generated event id is tracked for teardown. */
+function makeEvent(...args: Parameters<typeof makeRawEvent>): ReturnType<typeof makeRawEvent> {
+  const event = makeRawEvent(...args);
+  ownedWebhookEventIds.add(event.eventId);
+  return event;
+}
 
 beforeAll(async () => {
   cfg = await ensureTaxAndShippingConfig();
@@ -26,7 +48,7 @@ afterEach(() => {
   __setPaymentGateway(null);
 });
 afterAll(async () => {
-  await db.webhookEvent.deleteMany({});
+  await cleanupOwnedWebhookEvents(db, ownedWebhookEventIds);
   await cleanupCheckout();
   await cleanup();
   await db.$disconnect();

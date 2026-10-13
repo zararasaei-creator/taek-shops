@@ -1,7 +1,7 @@
 import { parse } from "csv-parse/sync";
 
 import { serverEnv } from "@/server/config/env";
-import { ImportFileError } from "@/server/import/errors";
+import { ImportFileError, type RowError } from "@/server/import/errors";
 import { neutralizeForImport } from "@/server/import/cell-sanitize";
 
 /**
@@ -15,10 +15,11 @@ import { neutralizeForImport } from "@/server/import/cell-sanitize";
  *   detection.
  *
  * The `SourceFormat` seam keeps the door open for an XLSX reader later without
- * touching callers: it would produce the same `ParsedTable`.
+ * touching callers: it would produce the same `ParsedTable`. Concrete readers
+ * are registered in `row-source.ts`.
  */
 
-export type SourceFormat = "csv";
+export type SourceFormat = "csv" | "xlsx";
 
 export interface ParsedRow {
   /** 1-based row number as it appears in the file (header is row 1). */
@@ -27,6 +28,16 @@ export interface ParsedRow {
   values: Record<string, string>;
   /** Columns whose value was altered by injection neutralisation. */
   neutralizedColumns: string[];
+  /**
+   * Format-level errors a `RowSource` wants treated as hard row failures —
+   * merged into the row's errors in `previewImport`, in addition to
+   * whatever `parseProductRow`'s own business validation finds. `parseCsv`
+   * never sets this (CSV has no format-level condition serious enough to
+   * warrant it); `parseXlsx` uses it for a genuine formula cell, which is a
+   * stronger signal than CSV's own neutralize-and-continue leading-
+   * character handling.
+   */
+  formatErrors?: RowError[];
 }
 
 export interface ParsedTable {

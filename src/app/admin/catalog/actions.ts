@@ -15,11 +15,19 @@ import {
   createProduct,
   updateProduct,
 } from "@/server/catalog/product-service";
-import { addProductOption } from "@/server/catalog/option-service";
+import { addProductOption, extendProductOption } from "@/server/catalog/option-service";
 import { createVariant } from "@/server/catalog/variant-service";
 import { adjustInventory } from "@/server/inventory/inventory-service";
 import { parseAmountToCents } from "@/server/domain/money";
 import { ADJUSTMENT_MOVEMENT_TYPES } from "@/lib/validation/catalog";
+import {
+  createProductImageUploadSlot,
+  finalizeProductImageUpload,
+  removeProductImage,
+  reorderProductImages,
+  updateProductImage,
+  type UploadSlot,
+} from "@/server/catalog/image-service";
 
 type AdjustmentType = (typeof ADJUSTMENT_MOVEMENT_TYPES)[number];
 
@@ -237,6 +245,43 @@ export async function addOptionAction(
   return result;
 }
 
+export async function extendOptionAction(
+  productId: string,
+  _prev: ActionResult | null,
+  form: FormData,
+) {
+  const actor = await getCurrentUser();
+  const meta = await requestMeta();
+
+  const backfill: { variantId: string; value: string }[] = [];
+  for (const key of form.keys()) {
+    const match = /^backfill_(.+)$/.exec(key);
+    if (match) {
+      const value = str(form, key);
+      if (value) backfill.push({ variantId: match[1]!, value });
+    }
+  }
+
+  const result = await run(() =>
+    extendProductOption(
+      actor,
+      productId,
+      {
+        name: str(form, "name"),
+        values: str(form, "values")
+          .split(/[\n,]/)
+          .map((v) => v.trim())
+          .filter(Boolean),
+        position: 0,
+        backfill,
+      },
+      meta,
+    ),
+  );
+  revalidatePath(`/admin/catalog/products/${productId}`);
+  return result;
+}
+
 export async function addVariantAction(
   productId: string,
   _prev: ActionResult | null,
@@ -296,5 +341,85 @@ export async function adjustInventoryAction(_prev: ActionResult | null, form: Fo
     }),
   );
   revalidatePath("/admin/catalog/inventory");
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Product images (Phase 9)
+// ---------------------------------------------------------------------------
+
+export type UploadSlotResult = { ok: true; slot: UploadSlot } | { ok: false; error: string };
+
+/**
+ * Step 1 of the S3-compatible direct-upload flow: creates a staged slot and
+ * (when the backend supports it) a short-lived presigned upload URL. The
+ * caller PUTs the file bytes directly to that URL, bypassing this server,
+ * then calls `finalizeImageUploadAction`. When `signedUpload` comes back
+ * `null` (local-filesystem backend), the caller must instead POST the file
+ * to `/api/admin/catalog/products/[id]/images` — see that route.
+ */
+export async function createImageUploadSlotAction(
+  productId: string,
+  input: { contentType: string; byteSize: number; variantId?: string | null },
+): Promise<UploadSlotResult> {
+  const actor = await getCurrentUser();
+  const meta = await requestMeta();
+  try {
+    const slot = await createProductImageUploadSlot(actor, productId, { ...input, ...meta });
+    return { ok: true, slot };
+  } catch (error) {
+    if (isCatalogError(error) || isAuthError(error)) return { ok: false, error: error.publicMessage };
+    throw error;
+  }
+}
+
+/**
+ * Step 2: fetches the actual uploaded bytes back from storage, verifies
+ * them for real, and — only on success — creates the `ProductImage` row.
+ * Never trusts anything the browser claimed about the file.
+ */
+export async function finalizeImageUploadAction(
+  productId: string,
+  uploadId: string,
+  input: { altText?: string; position?: number; isPrimary?: boolean },
+): Promise<ActionResult> {
+  const actor = await getCurrentUser();
+  const meta = await requestMeta();
+  const result = await run(async () => {
+    const image = await finalizeProductImageUpload(actor, uploadId, { ...input, ...meta });
+    return { id: image.id };
+  });
+  revalidatePath(`/admin/catalog/products/${productId}`);
+  return result;
+}
+
+export async function updateImageAction(
+  productId: string,
+  imageId: string,
+  input: { altText?: string; isPrimary?: boolean },
+): Promise<ActionResult> {
+  const actor = await getCurrentUser();
+  const meta = await requestMeta();
+  const result = await run(() => updateProductImage(actor, imageId, { ...input, ...meta }));
+  revalidatePath(`/admin/catalog/products/${productId}`);
+  return result;
+}
+
+export async function removeImageAction(productId: string, imageId: string): Promise<ActionResult> {
+  const actor = await getCurrentUser();
+  const meta = await requestMeta();
+  const result = await run(() => removeProductImage(actor, imageId, meta));
+  revalidatePath(`/admin/catalog/products/${productId}`);
+  return result;
+}
+
+export async function reorderImagesAction(
+  productId: string,
+  orderedImageIds: string[],
+): Promise<ActionResult> {
+  const actor = await getCurrentUser();
+  const meta = await requestMeta();
+  const result = await run(() => reorderProductImages(actor, productId, orderedImageIds, meta));
+  revalidatePath(`/admin/catalog/products/${productId}`);
   return result;
 }

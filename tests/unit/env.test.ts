@@ -74,4 +74,30 @@ describe("environment configuration", () => {
       /Invalid public environment configuration/,
     );
   });
+
+  it("treats an empty-string S3_* value the same as unset, not a validation error", async () => {
+    // The e2e harness explicitly blanks these out (playwright.config.ts) to
+    // force the local storage backend even when .env has real MinIO values
+    // — this must never throw, unlike a genuinely malformed non-empty value.
+    vi.stubEnv("S3_ENDPOINT", "");
+    vi.stubEnv("S3_REGION", "");
+    vi.stubEnv("S3_BUCKET", "");
+    vi.stubEnv("S3_ACCESS_KEY_ID", "");
+    vi.stubEnv("S3_SECRET_ACCESS_KEY", "");
+    vi.stubEnv("S3_PUBLIC_BASE_URL", "");
+    vi.resetModules();
+
+    const { serverEnv } = await import("@/server/config/env");
+    expect(serverEnv.S3_ENDPOINT).toBeUndefined();
+    expect(serverEnv.S3_BUCKET).toBeUndefined();
+  });
+
+  it("still rejects a genuinely malformed (non-empty) S3_ENDPOINT", async () => {
+    vi.stubEnv("S3_ENDPOINT", "not-a-url");
+    vi.resetModules();
+
+    await expect(import("@/server/config/env")).rejects.toThrow(
+      /Invalid server environment configuration/,
+    );
+  });
 });

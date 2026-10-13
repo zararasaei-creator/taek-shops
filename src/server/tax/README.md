@@ -3,8 +3,8 @@
 `TaxCalculator` interface + `ConfiguredRateTaxCalculator` (Phase 6).
 
 **The platform ships no tax rates.** They are operator data in `TaxRegion` /
-`TaxRate` (the seed adds an example Ontario/HST 13% row; the admin UI to manage
-them is Phase 11).
+`TaxRate` (the seed adds an example Ontario/HST 13% row; ADMINs maintain them
+at `/admin/settings/tax` — see `src/server/settings/tax-shipping-service.ts`).
 
 - `quote(lines, shipTo, at?) → TaxQuote` — matches a `TaxRegion` on
   `country` + `province`, falling back to a country-wide `province = ""` row.

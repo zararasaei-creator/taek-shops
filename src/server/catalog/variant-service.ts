@@ -10,11 +10,14 @@ import { optionSignature } from "@/server/catalog/option-signature";
 import { ensureOptionValueTx } from "@/server/catalog/option-service";
 import type { CatalogTxClient } from "@/server/catalog/tx";
 import {
+  matrixGenerateSchema,
   variantCreateSchema,
   variantUpdateSchema,
+  type MatrixCellInput,
   type VariantCreateInput,
   type VariantUpdateInput,
 } from "@/lib/validation/catalog";
+import { comboKey } from "@/lib/catalog/variant-matrix";
 
 /**
  * Variant administration.
@@ -62,16 +65,27 @@ async function assertBarcodeFree(
  * Resolve the caller's `{ option, value }` selections to optionValue ids for the
  * product, creating options/values as needed, then verify every product option
  * is covered exactly once. Returns the ids and the resulting signature.
+ *
+ * `exceptVariantId` (set when re-mapping an existing variant's selections) is
+ * excluded when counting the product's other variants: a product's introducing
+ * a brand-new option is only auto-allowed when there are no OTHER variants that
+ * would end up missing a value for it. Otherwise use `extendProductOption`.
  */
 async function resolveSelections(
-  tx: Pick<CatalogTxClient, "productOption" | "productOptionValue">,
+  tx: Pick<CatalogTxClient, "productOption" | "productOptionValue" | "productVariant">,
   productId: string,
   selections: { option: string; value: string }[],
+  exceptVariantId?: string,
 ): Promise<{
   optionValueIds: string[];
   joinRows: { optionId: string; optionValueId: string }[];
   signature: string;
 }> {
+  const otherVariantCount = await tx.productVariant.count({
+    where: { productId, ...(exceptVariantId ? { id: { not: exceptVariantId } } : {}) },
+  });
+  const allowNewOption = otherVariantCount === 0;
+
   const seenOptionNames = new Set<string>();
   const joinRows: { optionId: string; optionValueId: string }[] = [];
 
@@ -86,6 +100,7 @@ async function resolveSelections(
       productId,
       selection.option,
       selection.value,
+      { allowNewOption },
     );
     joinRows.push({ optionId, optionValueId });
   }
@@ -263,6 +278,7 @@ export async function updateVariant(
         tx,
         current.productId,
         data.optionSelections,
+        variantId,
       );
       await assertSignatureFree(tx, current.productId, signature, variantId);
       await tx.productVariantOptionValue.deleteMany({ where: { variantId } });
@@ -344,4 +360,72 @@ export async function archiveVariant(
     db,
   );
   return updated;
+}
+
+/**
+ * Bulk-create variants for the admin Variant Matrix Generator: every cell is
+ * created via `createVariantTx` inside ONE transaction, so the whole batch
+ * commits or none of it does. Each cell already names its own option
+ * selections by (existing) option/value name, exactly like a single
+ * `createVariant` call — the matrix generator only ever offers option values
+ * that already exist on the product, so this never implicitly creates a new
+ * option (use `extendProductOption` for that).
+ *
+ * Duplicate SKUs and duplicate option combinations *within the batch* are
+ * rejected up front (a proxy signature from the raw option/value names, since
+ * real ids aren't known until each cell resolves inside the transaction) so a
+ * bad batch fails with one clear, complete error instead of failing on
+ * whichever cell happens to collide first. Collisions against variants that
+ * already exist in the database are still caught by `createVariantTx` itself.
+ */
+export async function generateVariantMatrix(
+  actor: Actor,
+  productId: string,
+  input: { cells: unknown[] } & Meta,
+  db: Db = prisma,
+): Promise<ProductVariant[]> {
+  const authed = requirePermission(actor, "catalog.write");
+  const { cells } = matrixGenerateSchema.parse(input);
+
+  const skuCounts = new Map<string, number>();
+  const comboCounts = new Map<string, number>();
+  for (const cell of cells) {
+    skuCounts.set(cell.sku, (skuCounts.get(cell.sku) ?? 0) + 1);
+    const key = comboKey(
+      cell.optionSelections.map((s) => ({ optionName: s.option, value: s.value })),
+    );
+    comboCounts.set(key, (comboCounts.get(key) ?? 0) + 1);
+  }
+  const dupeSkus = [...skuCounts.entries()].filter(([, n]) => n > 1).map(([sku]) => sku);
+  if (dupeSkus.length > 0) {
+    throw new ConflictError(`Duplicate SKU(s) within this batch: ${dupeSkus.join(", ")}.`);
+  }
+  const dupeCombos = [...comboCounts.entries()].filter(([, n]) => n > 1).length;
+  if (dupeCombos > 0) {
+    throw new ConflictError(
+      `${dupeCombos} option combination(s) are repeated more than once within this batch.`,
+    );
+  }
+
+  const variants = await db.$transaction(async (tx) => {
+    const created: ProductVariant[] = [];
+    for (const cell of cells as MatrixCellInput[]) {
+      created.push(await createVariantTx(tx, productId, cell, authed.id));
+    }
+    return created;
+  });
+
+  await recordAudit(
+    {
+      action: AUDIT_ACTIONS.VARIANT_MATRIX_GENERATED,
+      actorUserId: authed.id,
+      entityType: "Product",
+      entityId: productId,
+      metadata: { count: variants.length, skus: variants.map((v) => v.sku) },
+      ipAddress: input.ipAddress,
+      userAgent: input.userAgent,
+    },
+    db,
+  );
+  return variants;
 }
