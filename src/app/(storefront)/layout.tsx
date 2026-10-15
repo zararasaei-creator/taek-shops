@@ -1,6 +1,5 @@
-import Link from "next/link";
-
-import { Container } from "@/components/ui/container";
+import { SiteFooter } from "@/components/storefront/site-footer";
+import { SiteHeader } from "@/components/storefront/site-header";
 import { getCurrentUser } from "@/server/auth";
 import { cartIdentity } from "@/server/cart/identity";
 import { findActiveCart, getCartSummary } from "@/server/cart/cart-service";
@@ -16,48 +15,21 @@ async function cartItemCount(): Promise<number> {
 
 export default async function StorefrontLayout({ children }: LayoutProps<"/">) {
   const [count, user] = await Promise.all([cartItemCount(), getCurrentUser()]);
+  const signedIn = Boolean(user);
 
   return (
     <div className="flex min-h-full flex-col">
-      <header className="border-b border-zinc-200 dark:border-zinc-800">
-        <Container as="nav" className="flex h-16 items-center justify-between">
-          <Link href="/" className="text-lg font-semibold tracking-tight">
-            Taek Shops
-          </Link>
-          <div className="flex items-center gap-4 text-sm">
-            {user ? (
-              <>
-                <Link href="/account" data-testid="nav-account">
-                  Account
-                </Link>
-                <Link href="/account/orders" data-testid="nav-my-orders">
-                  My orders
-                </Link>
-              </>
-            ) : (
-              <>
-                <Link href="/login?next=/account" data-testid="nav-sign-in">
-                  Sign in
-                </Link>
-                <Link href="/register" data-testid="nav-create-account">
-                  Create account
-                </Link>
-              </>
-            )}
-            <Link href="/cart" data-testid="nav-cart">
-              Cart{count > 0 ? ` (${count})` : ""}
-            </Link>
-          </div>
-        </Container>
-      </header>
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:rounded-md focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white"
+      >
+        Skip to content
+      </a>
+      <SiteHeader signedIn={signedIn} cartCount={count} />
       <main id="main-content" className="flex-1">
         {children}
       </main>
-      <footer className="border-t border-zinc-200 py-6 text-sm text-zinc-500 dark:border-zinc-800">
-        <Container>
-          &copy; {new Date().getFullYear()} Taek Shops. All prices in Canadian dollars.
-        </Container>
-      </footer>
+      <SiteFooter signedIn={signedIn} />
     </div>
   );
 }

@@ -4270,6 +4270,29 @@ far from 2 GiB, with sub-second responses and no failures, while the 1-vCPU quot
 Cleaned up: the measurement's containers, volume, network, cgroup and images. The BuildKit build cache remains (not
 pruned: it is shared with any other build).
 
+#### Storefront homepage redesign (2026-10-15) — local verification only; hosted verification PENDING
+
+Presentation-only redesign of the storefront landing page and its shared header/footer, requested after the owner's
+review (plain heading, empty space, "No image" card). Hero ("Ready for your next level."), category tiles (Uniforms,
+Footwear, Belts, Protective Gear), featured products from the existing `listPublicProducts` query, brand intro, footer;
+warm-white/charcoal/red palette as CSS tokens in `src/app/globals.css`. Files: `src/app/(storefront)/layout.tsx`,
+`src/app/(storefront)/page.tsx`, `src/components/storefront/{illustrations,product-card,site-header,site-footer}.tsx`,
+`tests/unit/home.test.tsx`, `tests/unit/site-header.test.tsx`, `docs/storefront-assets.md`. Catalog, cart, auth,
+pricing, inventory, checkout and payment logic, the database, dependencies and schema are untouched.
+*Honest limits:* all imagery is **original vector illustration** authored in the code — there are no photographs and
+nothing was downloaded (provenance: `docs/storefront-assets.md`); a category tile links only when a published product
+belongs to it, otherwise it says "No products listed yet" (Footwear, Belts and Protective Gear currently have none); a
+product with no photo shows "Photo not added yet", never a stand-in picture; the product's stored description is not
+shown (the seed text ends "Sample seed data."). The shared header/footer keep every `data-testid` and the exact
+"Cart (N)" text, and contain no `<img>` (the product-images e2e takes the first `<img>`).
+**Verified locally (this machine, dev server):** `tsc --noEmit` and ESLint clean on the changed files (`npm run
+typecheck` could not run because its `prisma generate` step is blocked by the running dev server's open engine file);
+`home.test.tsx` + `site-header.test.tsx` 10/10 (header signed-in/out links, cart text, in-page anchors, category
+availability); visual inspection at desktop, 375 px mobile and dark mode; every link and in-page anchor on the page
+resolves. **Not yet verified:** the e2e specs that depend on the shared header (checkout, registration, order history,
+variant picker, product images), the production build, and the full pipeline against these changes — **hosted
+verification is pending** (one manual run is planned for the commit that adds this entry; its result is not claimed here).
+
 ---
 
 ### Original Phase 13 scope and acceptance criteria
